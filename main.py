@@ -1,6 +1,12 @@
 import json
 import os
+import sys
 from typing import Optional
+
+# Reconfigure stdout/stderr to support UTF-8 characters (like Arabic and emojis) on Windows
+if sys.platform.startswith("win"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 
 import typer
 import yt_dlp
@@ -413,13 +419,29 @@ def download_from_info_json(
 # =====================================================================
 
 
+def fix_arabic(text: str) -> str:
+    """Reshapes Arabic text and applies BiDi algorithm for correct terminal display."""
+    if not text:
+        return text
+    has_arabic = any(0x0600 <= ord(char) <= 0x06FF or 0x0750 <= ord(char) <= 0x077F or 0x08A0 <= ord(char) <= 0x08FF for char in text)
+    if not has_arabic:
+        return text
+    try:
+        import arabic_reshaper
+        from bidi.algorithm import get_display
+        reshaped = arabic_reshaper.reshape(text)
+        return get_display(reshaped)
+    except Exception:
+        return text
+
+
 def print_video_info(info: dict, console: Console):
     """Print video/playlist metadata beautifully using Rich panels and tables."""
     _type = info.get("_type", "video")
 
     if _type == "playlist":
-        title = info.get("title", "Unknown Playlist")
-        uploader = info.get("uploader") or info.get("uploader_id") or "Unknown"
+        title = fix_arabic(info.get("title", "Unknown Playlist"))
+        uploader = fix_arabic(info.get("uploader") or info.get("uploader_id") or "Unknown")
         entries = info.get("entries", [])
         video_count = len(entries)
 
@@ -444,14 +466,14 @@ def print_video_info(info: dict, console: Console):
                 duration = (
                     f"{dur_secs // 60}:{dur_secs % 60:02d}" if dur_secs else "Unknown"
                 )
-                table.add_row(str(idx), entry.get("title", "Unknown"), duration)
+                table.add_row(str(idx), fix_arabic(entry.get("title", "Unknown")), duration)
 
         console.print(table)
         if video_count > 10:
             console.print(f"[dim]... and {video_count - 10} more videos[/dim]")
     else:
-        title = info.get("title", "Unknown Title")
-        uploader = info.get("uploader", "Unknown Uploader")
+        title = fix_arabic(info.get("title", "Unknown Title"))
+        uploader = fix_arabic(info.get("uploader", "Unknown Uploader"))
         duration_secs = info.get("duration")
         duration = (
             f"{duration_secs // 60}:{duration_secs % 60:02d}"
@@ -470,6 +492,7 @@ def print_video_info(info: dict, console: Console):
         desc_summary = "\n".join(desc_lines[:3])
         if len(desc_lines) > 3 or len(desc_summary) > 200:
             desc_summary = desc_summary[:200] + "..."
+        desc_summary = fix_arabic(desc_summary)
 
         console.print(
             Panel(
@@ -560,7 +583,7 @@ def do_download_interactive(
     console.print(
         Panel(
             menu_table,
-            title=f"[bold magenta]📥 Download Settings for: {info.get('title', 'Video')[:50]}...[/bold magenta]",
+            title=f"[bold magenta]📥 Download Settings for: {fix_arabic(info.get('title', 'Video')[:50])}...[/bold magenta]",
             border_style="magenta",
             expand=False,
         )
