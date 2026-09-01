@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Annotated, Any, Callable, Generator, cast
 
 # Reconfigure stdout/stderr to support UTF-8 characters (like Arabic and emojis) on Windows
@@ -330,6 +331,36 @@ def make_duration_filter(
 
 
 # =====================================================================
+# Platform-Agnostic Directory Helpers
+# =====================================================================
+
+
+def get_default_downloads_dir() -> Path:
+    """Returns the platform-agnostic default Downloads directory."""
+    xdg_download = os.environ.get("XDG_DOWNLOAD_DIR")
+    if xdg_download and os.path.exists(xdg_download):
+        download_path = Path(xdg_download)
+    else:
+        download_path = Path.home() / "Downloads"
+    download_path.mkdir(parents=True, exist_ok=True)
+    return download_path
+
+
+def get_default_music_dir() -> Path:
+    """Returns the platform-agnostic audio download directory (~/Downloads/audio)."""
+    audio_dir = get_default_downloads_dir() / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    return audio_dir
+
+
+def get_default_video_dir() -> Path:
+    """Returns the platform-agnostic video download directory (~/Downloads/video)."""
+    video_dir = get_default_downloads_dir() / "video"
+    video_dir.mkdir(parents=True, exist_ok=True)
+    return video_dir
+
+
+# =====================================================================
 # API / Core Functions
 # =====================================================================
 
@@ -354,14 +385,19 @@ def download_video(
     url: str,
     opts_override: dict[str, Any] | None = None,
     cookies_from_browser: str | None = None,
+    output_dir: str | Path | None = None,
     verbose: bool = False,
 ) -> int:
     """Download a video with optional custom configurations."""
+    target_dir = Path(output_dir) if output_dir else get_default_video_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+
     tracker = DownloadTracker()
     ydl_opts: dict[str, Any] = {
         "logger": MyLogger(verbose=verbose),
         "progress_hooks": [tracker.hook],
         "quiet": True,
+        "paths": {"home": str(target_dir)},
     }
 
     if cookies_from_browser:
@@ -382,10 +418,12 @@ def download_audio(
     url: str,
     format_codec: str = "m4a",
     cookies_from_browser: str | None = None,
+    output_dir: str | Path | None = None,
     sponsorblock: bool = False,
     verbose: bool = False,
 ) -> int:
     """Download and extract audio format only."""
+    target_dir = Path(output_dir) if output_dir else get_default_music_dir()
     opts: dict[str, Any] = {
         "format": "m4a/bestaudio/best",
         "postprocessors": [
@@ -402,6 +440,7 @@ def download_audio(
         url,
         opts_override=opts,
         cookies_from_browser=cookies_from_browser,
+        output_dir=target_dir,
         verbose=verbose,
     )
 
@@ -410,14 +449,19 @@ def download_from_info_json(
     info_file: str,
     opts_override: dict[str, Any] | None = None,
     cookies_from_browser: str | None = None,
+    output_dir: str | Path | None = None,
     verbose: bool = False,
 ) -> int:
     """Download video using an existing info.json file."""
+    target_dir = Path(output_dir) if output_dir else get_default_video_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+
     tracker = DownloadTracker()
     ydl_opts: dict[str, Any] = {
         "logger": MyLogger(verbose=verbose),
         "progress_hooks": [tracker.hook],
         "quiet": True,
+        "paths": {"home": str(target_dir)},
     }
 
     if cookies_from_browser:
@@ -439,37 +483,13 @@ def download_from_info_json(
 # =====================================================================
 
 
-def fix_arabic(text: str) -> str:
-    """Reshapes Arabic text and applies BiDi algorithm for correct terminal display."""
-    if not text:
-        return text
-    has_arabic = any(
-        0x0600 <= ord(char) <= 0x06FF
-        or 0x0750 <= ord(char) <= 0x077F
-        or 0x08A0 <= ord(char) <= 0x08FF
-        for char in text
-    )
-    if not has_arabic:
-        return text
-    try:
-        import arabic_reshaper
-        from bidi.algorithm import get_display
-
-        reshaped = arabic_reshaper.reshape(text)
-        return str(get_display(reshaped))
-    except Exception:
-        return text
-
-
 def print_video_info(info: dict[str, Any], console: Console) -> None:
     """Print video/playlist metadata beautifully using Rich panels and tables."""
     _type = info.get("_type", "video")
 
     if _type == "playlist":
-        title = fix_arabic(str(info.get("title", "Unknown Playlist")))
-        uploader = fix_arabic(
-            str(info.get("uploader") or info.get("uploader_id") or "Unknown")
-        )
+        title = str(info.get("title", "Unknown Playlist"))
+        uploader = str(info.get("uploader") or info.get("uploader_id") or "Unknown")
         entries: list[dict[str, Any]] = info.get("entries", [])
         video_count = len(entries)
 
@@ -496,16 +516,14 @@ def print_video_info(info: dict[str, Any], console: Console) -> None:
                     if isinstance(dur_secs, int)
                     else "Unknown"
                 )
-                table.add_row(
-                    str(idx), fix_arabic(str(entry.get("title", "Unknown"))), duration
-                )
+                table.add_row(str(idx), str(entry.get("title", "Unknown")), duration)
 
         console.print(table)
         if video_count > 10:
             console.print(f"[dim]... and {video_count - 10} more videos[/dim]")
     else:
-        title = fix_arabic(str(info.get("title", "Unknown Title")))
-        uploader = fix_arabic(str(info.get("uploader", "Unknown Uploader")))
+        title = str(info.get("title", "Unknown Title"))
+        uploader = str(info.get("uploader", "Unknown Uploader"))
         duration_secs = info.get("duration")
         duration = (
             f"{duration_secs // 60}:{duration_secs % 60:02d}"
@@ -523,7 +541,6 @@ def print_video_info(info: dict[str, Any], console: Console) -> None:
         desc_summary = "\n".join(desc_lines[:3])
         if len(desc_lines) > 3 or len(desc_summary) > 200:
             desc_summary = desc_summary[:200] + "..."
-        desc_summary = fix_arabic(desc_summary)
 
         console.print(
             Panel(
@@ -616,7 +633,7 @@ def do_download_interactive(
     console.print(
         Panel(
             menu_table,
-            title=f"[bold magenta]📥 Download Settings for: {fix_arabic(str(info.get('title', 'Video'))[:50])}...[/bold magenta]",
+            title=f"[bold magenta]📥 Download Settings for: {str(info.get('title', 'Video'))[:50]}...[/bold magenta]",
             border_style="magenta",
             expand=False,
         )
@@ -627,6 +644,8 @@ def do_download_interactive(
     )
 
     opts: dict[str, Any] = {}
+    target_dir = get_default_video_dir()
+
     if choice == "1":
         pass
     elif choice == "2":
@@ -684,6 +703,8 @@ def do_download_interactive(
                 return
             selected_format = choices_list[choice_idx - 1]
             opts["format"] = selected_format[1]
+            if selected_format[0].startswith("🎵 Audio"):
+                target_dir = get_default_music_dir()
             if selected_format[2]:
                 opts["merge_output_format"] = selected_format[2]
                 opts["remux_video"] = selected_format[2]
@@ -710,9 +731,12 @@ def do_download_interactive(
     if skip_sponsors:
         opts["sponsorblock_skip"] = ["sponsor", "selfpromo"]
 
-    console.print("[blue]Starting download...[/blue]")
+    console.print(f"[blue]Starting download to [cyan]{target_dir}[/cyan]...[/blue]")
     error_code = download_video(
-        url, opts_override=opts, cookies_from_browser=session_cookies_browser
+        url,
+        opts_override=opts,
+        cookies_from_browser=session_cookies_browser,
+        output_dir=target_dir,
     )
     if error_code:
         console.print("[bold red]❌ Download failed![/bold red]")
@@ -817,17 +841,30 @@ def run_interactive_menu() -> None:
                 choices=["m4a", "mp3", "wav", "flac"],
                 default="m4a",
             )
-            console.print(f"[blue]Starting audio download ({codec})...[/blue]")
-            _ = download_audio(url, codec, cookies_from_browser=session_cookies_browser)
+            music_dir = get_default_music_dir()
+            console.print(
+                f"[blue]Starting audio download ({codec}) to [cyan]{music_dir}[/cyan]...[/blue]"
+            )
+            _ = download_audio(
+                url,
+                codec,
+                cookies_from_browser=session_cookies_browser,
+                output_dir=music_dir,
+            )
 
         elif choice == "4":
             info_file = Prompt.ask("Enter path to info.json file")
             if not os.path.exists(info_file):
                 console.print(f"[bold red]File not found: {info_file}[/bold red]")
                 continue
-            console.print(f"[blue]Downloading using {info_file}...[/blue]")
+            video_dir = get_default_video_dir()
+            console.print(
+                f"[blue]Downloading to [cyan]{video_dir}[/cyan] using {info_file}...[/blue]"
+            )
             _ = download_from_info_json(
-                info_file, cookies_from_browser=session_cookies_browser
+                info_file,
+                cookies_from_browser=session_cookies_browser,
+                output_dir=video_dir,
             )
 
         elif choice == "5":
@@ -934,6 +971,14 @@ def download(
         str | None,
         Option("--info-json", "-j", help="Path to info.json file to download from"),
     ] = None,
+    output_dir: Annotated[
+        str | None,
+        Option(
+            "--output-dir",
+            "-o",
+            help="Target directory for downloaded file (defaults to ~/Downloads/video or ~/Downloads/audio for audio)",
+        ),
+    ] = None,
     format_code: Annotated[
         str | None,
         Option("--format", "-f", help="Format code (e.g. 'bestvideo+bestaudio')"),
@@ -998,6 +1043,14 @@ def download(
         )
         raise typer.Exit(code=1)
 
+    target_dir: Path
+    if output_dir:
+        target_dir = Path(output_dir)
+    elif audio_only:
+        target_dir = get_default_music_dir()
+    else:
+        target_dir = get_default_video_dir()
+
     opts: dict[str, Any] = {}
 
     # Setup formats
@@ -1028,23 +1081,27 @@ def download(
             console.print(f"[bold red]Error: File not found: {info_json}[/bold red]")
             raise typer.Exit(code=1)
         console.print(
-            f"[blue]Starting download using info file: [cyan]{info_json}[/cyan][/blue]"
+            f"[blue]Starting download to [cyan]{target_dir}[/cyan] using info file: [cyan]{info_json}[/cyan][/blue]"
         )
         error_code = download_from_info_json(
             info_json,
             opts_override=opts,
             cookies_from_browser=cookies_from_browser,
+            output_dir=target_dir,
             verbose=verbose,
         )
     else:
         if not url:
             console.print("[bold red]Error: Video URL is required.[/bold red]")
             raise typer.Exit(code=1)
-        console.print(f"[blue]Starting download for: [cyan]{url}[/cyan][/blue]")
+        console.print(
+            f"[blue]Starting download to [cyan]{target_dir}[/cyan] for: [cyan]{url}[/cyan][/blue]"
+        )
         error_code = download_video(
             url,
             opts_override=opts,
             cookies_from_browser=cookies_from_browser,
+            output_dir=target_dir,
             verbose=verbose,
         )
 
@@ -1060,6 +1117,14 @@ def download(
 @app.command()
 def audio(
     url: Annotated[str, Argument(help="The video URL to extract audio from")],
+    output_dir: Annotated[
+        str | None,
+        Option(
+            "--output-dir",
+            "-o",
+            help="Target directory for downloaded audio (defaults to ~/Downloads/audio)",
+        ),
+    ] = None,
     codec: Annotated[
         str, Option("--codec", "-c", help="Audio codec (m4a, mp3, wav, flac, etc.)")
     ] = "m4a",
@@ -1087,11 +1152,15 @@ def audio(
     Extract and download audio from a video.
     """
     console = Console()
-    console.print(f"[blue]Extracting audio ({codec}) from: [cyan]{url}[/cyan][/blue]")
+    target_dir = Path(output_dir) if output_dir else get_default_music_dir()
+    console.print(
+        f"[blue]Extracting audio ({codec}) to [cyan]{target_dir}[/cyan] from: [cyan]{url}[/cyan][/blue]"
+    )
     error_code = download_audio(
         url,
         format_codec=codec,
         cookies_from_browser=cookies_from_browser,
+        output_dir=target_dir,
         sponsorblock=sponsorblock,
         verbose=verbose,
     )
