@@ -1,12 +1,14 @@
 import json
 import os
 import sys
-from typing import Optional
+from typing import Annotated, Any, Callable, Generator, cast
 
 # Reconfigure stdout/stderr to support UTF-8 characters (like Arabic and emojis) on Windows
 if sys.platform.startswith("win"):
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
+    if hasattr(sys.stdout, "reconfigure"):
+        getattr(sys.stdout, "reconfigure")(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        getattr(sys.stderr, "reconfigure")(encoding="utf-8")
 
 import typer
 import yt_dlp
@@ -17,11 +19,12 @@ from rich.progress import (
     BarColumn,
     DownloadColumn,
     Progress,
+    TaskID,
     TextColumn,
     TimeRemainingColumn,
     TransferSpeedColumn,
 )
-from rich.prompt import IntPrompt, Prompt, Confirm
+from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 from typer import Argument, Option, Typer
 
@@ -32,7 +35,7 @@ app = Typer(
 )
 
 # Global session variable for browser cookies in interactive mode
-SESSION_COOKIES_BROWSER = None
+session_cookies_browser: str | None = None
 
 # =====================================================================
 # Custom Logger and Progress Tracker
@@ -42,11 +45,14 @@ SESSION_COOKIES_BROWSER = None
 class MyLogger:
     """Custom logger to pipe yt-dlp output to Rich formatting."""
 
+    console: Console
+    verbose: bool
+
     def __init__(self, verbose: bool = False):
         self.console = Console()
         self.verbose = verbose
 
-    def debug(self, msg: str):
+    def debug(self, msg: str) -> None:
         # yt-dlp outputs debug and info messages through debug()
         if msg.startswith("[debug] "):
             if self.verbose:
@@ -54,33 +60,37 @@ class MyLogger:
         else:
             self.info(msg)
 
-    def info(self, msg: str):
+    def info(self, msg: str) -> None:
         if self.verbose:
             self.console.print(f"[cyan]{msg}[/cyan]")
 
-    def warning(self, msg: str):
+    def warning(self, msg: str) -> None:
         self.console.print(f"[yellow]⚠️  Warning: {msg}[/yellow]")
 
-    def error(self, msg: str):
+    def error(self, msg: str) -> None:
         self.console.print(f"[bold red]❌ Error: {msg}[/bold red]")
 
 
 class DownloadTracker:
     """Manages a beautiful, real-time Rich progress bar for downloads."""
 
+    progress: Progress | None
+    task_id: TaskID | None
+    current_filename: str | None
+
     def __init__(self):
         self.progress = None
         self.task_id = None
         self.current_filename = None
 
-    def hook(self, d: dict):
-        if d["status"] == "downloading":
-            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-            downloaded = d.get("downloaded_bytes", 0)
-            filename = d.get("filename", "Unknown File")
+    def hook(self, d: dict[str, Any]) -> None:
+        if d.get("status") == "downloading":
+            total: int = int(d.get("total_bytes") or d.get("total_bytes_estimate") or 0)
+            downloaded: int = int(d.get("downloaded_bytes") or 0)
+            filename: str = str(d.get("filename", "Unknown File"))
             display_name = os.path.basename(filename)
 
-            if not self.progress:
+            if self.progress is None:
                 self.progress = Progress(
                     TextColumn("[bold blue]{task.description}"),
                     BarColumn(),
@@ -95,25 +105,26 @@ class DownloadTracker:
                 )
                 self.current_filename = filename
 
-            if filename != self.current_filename:
-                # Update task description and total for new file (e.g. video merge or audio extraction)
-                self.current_filename = filename
-                display_name = os.path.basename(filename)
-                self.progress.update(
-                    self.task_id,
-                    description=f"Downloading {display_name[:30]}...",
-                    total=total,
-                    completed=downloaded,
-                )
-            else:
-                self.progress.update(self.task_id, completed=downloaded, total=total)
+            if self.progress is not None and self.task_id is not None:
+                if filename != self.current_filename:
+                    self.current_filename = filename
+                    self.progress.update(
+                        self.task_id,
+                        description=f"Downloading {display_name[:30]}...",
+                        total=total,
+                        completed=downloaded,
+                    )
+                else:
+                    self.progress.update(
+                        self.task_id, completed=downloaded, total=total
+                    )
 
-        elif d["status"] == "finished":
-            if self.progress:
+        elif d.get("status") == "finished":
+            if self.progress is not None:
                 self.progress.stop()
                 self.progress = None
                 self.task_id = None
-            filename = d.get("filename", "Unknown File")
+            filename = str(d.get("filename", "Unknown File"))
             display_name = os.path.basename(filename)
             rich_console = Console()
             rich_console.print(
@@ -127,13 +138,15 @@ class DownloadTracker:
 # =====================================================================
 
 
-def format_selector(ctx: dict):
+def format_selector(ctx: dict[str, Any]) -> Generator[dict[str, Any] | Any, None, None]:
     """
     Select the best video and the best audio that won't result in an mkv.
     (Custom format selector example)
     """
-    # formats are already sorted worst to best
-    formats = ctx.get("formats")[::-1]
+    formats_list = ctx.get("formats")
+    if not formats_list:
+        return
+    formats: list[dict[str, Any]] = formats_list[::-1]
 
     # Find best video
     try:
@@ -150,7 +163,7 @@ def format_selector(ctx: dict):
         return
 
     # Find compatible audio extension (mp4 -> m4a, webm -> webm)
-    video_ext = best_video.get("ext")
+    video_ext = str(best_video.get("ext") or "mp4")
     audio_ext = {"mp4": "m4a", "webm": "webm"}.get(video_ext, "m4a")
 
     try:
@@ -179,20 +192,22 @@ def format_selector(ctx: dict):
     }
 
 
-def get_interactive_format_choices(info: dict):
+def get_interactive_format_choices(
+    info: dict[str, Any],
+) -> list[tuple[str, str, str | None]]:
     """
     Parses formats list from video info metadata and compiles a list of
     clean, user-friendly download options (e.g. resolutions and audio-only).
     """
-    formats = info.get("formats", [])
+    formats: list[dict[str, Any]] = info.get("formats", [])
 
-    choices = []
-    resolutions = {}  # resolution string -> best format dict
-    audio_formats = []
+    choices: list[tuple[str, str, str | None]] = []
+    resolutions: dict[str, dict[str, Any]] = {}  # resolution string -> best format dict
+    audio_formats: list[dict[str, Any]] = []
 
     for f in formats:
-        vcodec = f.get("vcodec", "none")
-        acodec = f.get("acodec", "none")
+        vcodec = str(f.get("vcodec", "none"))
+        acodec = str(f.get("acodec", "none"))
 
         if vcodec != "none":
             height = f.get("height")
@@ -215,9 +230,9 @@ def get_interactive_format_choices(info: dict):
     # Video choices
     for res in sorted_res:
         f = resolutions[res]
-        fid = f.get("format_id")
-        ext = f.get("ext")
-        acodec = f.get("acodec", "none")
+        fid = str(f.get("format_id", ""))
+        ext = str(f.get("ext", ""))
+        acodec = str(f.get("acodec", "none"))
 
         size_bytes = f.get("filesize") or f.get("filesize_approx")
         size_str = f" (~{size_bytes / (1024 * 1024):.1f} MB)" if size_bytes else ""
@@ -235,8 +250,8 @@ def get_interactive_format_choices(info: dict):
 
     # Audio choices (Keep top 3 audio formats)
     for af in audio_formats[-3:]:
-        fid = af.get("format_id")
-        ext = af.get("ext")
+        fid = str(af.get("format_id", ""))
+        ext = str(af.get("ext", ""))
         abr = af.get("abr")
         abr_str = f" @ {abr}kbps" if abr else ""
         size_bytes = af.get("filesize") or af.get("filesize_approx")
@@ -246,18 +261,18 @@ def get_interactive_format_choices(info: dict):
     return choices
 
 
-def get_universal_mp4_choices(info: dict):
+def get_universal_mp4_choices(info: dict[str, Any]) -> list[tuple[str, str]]:
     """
     Finds available resolutions that support H.264 (avc1) video codec
     and formats them as user-friendly options merged with AAC audio.
     """
-    formats = info.get("formats", [])
-    choices = []
-    resolutions = {}
+    formats: list[dict[str, Any]] = info.get("formats", [])
+    choices: list[tuple[str, str]] = []
+    resolutions: dict[str, dict[str, Any]] = {}
 
     # H.264 codec in YouTube starts with avc1
     for f in formats:
-        vcodec = f.get("vcodec", "none")
+        vcodec = str(f.get("vcodec", "none"))
 
         if vcodec != "none" and vcodec.startswith("avc1"):
             height = f.get("height")
@@ -281,7 +296,7 @@ def get_universal_mp4_choices(info: dict):
 
     for res in sorted_res:
         f = resolutions[res]
-        fid = f.get("format_id")
+        fid = str(f.get("format_id", ""))
         size_bytes = f.get("filesize") or f.get("filesize_approx")
         size_str = f" (~{size_bytes / (1024 * 1024):.1f} MB)" if size_bytes else ""
 
@@ -295,10 +310,14 @@ def get_universal_mp4_choices(info: dict):
     return choices
 
 
-def make_duration_filter(min_len: Optional[int] = None, max_len: Optional[int] = None):
+def make_duration_filter(
+    min_len: int | None = None, max_len: int | None = None
+) -> Callable[..., str | None]:
     """Generates a duration matching filter callback."""
 
-    def duration_filter(info: dict, *, incomplete: bool):
+    def duration_filter(
+        info: dict[str, Any], *, incomplete: bool = False
+    ) -> str | None:
         duration = info.get("duration")
         if duration:
             if min_len is not None and duration < min_len:
@@ -316,29 +335,30 @@ def make_duration_filter(min_len: Optional[int] = None, max_len: Optional[int] =
 
 
 def get_video_info(
-    url: str, cookies_from_browser: Optional[str] = None, verbose: bool = False
-) -> dict:
+    url: str, cookies_from_browser: str | None = None, verbose: bool = False
+) -> dict[str, Any]:
     """Extract video metadata without downloading it."""
-    ydl_opts = {
+    ydl_opts: dict[str, Any] = {
         "logger": MyLogger(verbose=verbose),
         "quiet": not verbose,
     }
     if cookies_from_browser:
         ydl_opts["cookiesfrombrowser"] = (cookies_from_browser,)
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        return ydl.extract_info(url, download=False)
+    with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
+        info = ydl.extract_info(url, download=False)
+        return cast(dict[str, Any], info)
 
 
 def download_video(
     url: str,
-    opts_override: Optional[dict] = None,
-    cookies_from_browser: Optional[str] = None,
+    opts_override: dict[str, Any] | None = None,
+    cookies_from_browser: str | None = None,
     verbose: bool = False,
 ) -> int:
     """Download a video with optional custom configurations."""
     tracker = DownloadTracker()
-    ydl_opts = {
+    ydl_opts: dict[str, Any] = {
         "logger": MyLogger(verbose=verbose),
         "progress_hooks": [tracker.hook],
         "quiet": True,
@@ -351,8 +371,8 @@ def download_video(
         ydl_opts.update(opts_override)
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return ydl.download([url])
+        with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
+            return int(ydl.download([url]))
     except Exception as e:
         Console().print(f"[bold red]❌ Download error: {e}[/bold red]")
         return 1
@@ -361,12 +381,12 @@ def download_video(
 def download_audio(
     url: str,
     format_codec: str = "m4a",
-    cookies_from_browser: Optional[str] = None,
+    cookies_from_browser: str | None = None,
     sponsorblock: bool = False,
     verbose: bool = False,
 ) -> int:
     """Download and extract audio format only."""
-    opts = {
+    opts: dict[str, Any] = {
         "format": "m4a/bestaudio/best",
         "postprocessors": [
             {
@@ -377,7 +397,7 @@ def download_audio(
     }
     if sponsorblock:
         opts["sponsorblock_skip"] = ["sponsor", "selfpromo"]
-        
+
     return download_video(
         url,
         opts_override=opts,
@@ -388,13 +408,13 @@ def download_audio(
 
 def download_from_info_json(
     info_file: str,
-    opts_override: Optional[dict] = None,
-    cookies_from_browser: Optional[str] = None,
+    opts_override: dict[str, Any] | None = None,
+    cookies_from_browser: str | None = None,
     verbose: bool = False,
 ) -> int:
     """Download video using an existing info.json file."""
     tracker = DownloadTracker()
-    ydl_opts = {
+    ydl_opts: dict[str, Any] = {
         "logger": MyLogger(verbose=verbose),
         "progress_hooks": [tracker.hook],
         "quiet": True,
@@ -407,8 +427,8 @@ def download_from_info_json(
         ydl_opts.update(opts_override)
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return ydl.download_with_info_file(info_file)
+        with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
+            return int(ydl.download_with_info_file(info_file))
     except Exception as e:
         Console().print(f"[bold red]❌ Download error: {e}[/bold red]")
         return 1
@@ -423,26 +443,34 @@ def fix_arabic(text: str) -> str:
     """Reshapes Arabic text and applies BiDi algorithm for correct terminal display."""
     if not text:
         return text
-    has_arabic = any(0x0600 <= ord(char) <= 0x06FF or 0x0750 <= ord(char) <= 0x077F or 0x08A0 <= ord(char) <= 0x08FF for char in text)
+    has_arabic = any(
+        0x0600 <= ord(char) <= 0x06FF
+        or 0x0750 <= ord(char) <= 0x077F
+        or 0x08A0 <= ord(char) <= 0x08FF
+        for char in text
+    )
     if not has_arabic:
         return text
     try:
         import arabic_reshaper
         from bidi.algorithm import get_display
+
         reshaped = arabic_reshaper.reshape(text)
-        return get_display(reshaped)
+        return str(get_display(reshaped))
     except Exception:
         return text
 
 
-def print_video_info(info: dict, console: Console):
+def print_video_info(info: dict[str, Any], console: Console) -> None:
     """Print video/playlist metadata beautifully using Rich panels and tables."""
     _type = info.get("_type", "video")
 
     if _type == "playlist":
-        title = fix_arabic(info.get("title", "Unknown Playlist"))
-        uploader = fix_arabic(info.get("uploader") or info.get("uploader_id") or "Unknown")
-        entries = info.get("entries", [])
+        title = fix_arabic(str(info.get("title", "Unknown Playlist")))
+        uploader = fix_arabic(
+            str(info.get("uploader") or info.get("uploader_id") or "Unknown")
+        )
+        entries: list[dict[str, Any]] = info.get("entries", [])
         video_count = len(entries)
 
         console.print(
@@ -464,30 +492,33 @@ def print_video_info(info: dict, console: Console):
             if entry:
                 dur_secs = entry.get("duration")
                 duration = (
-                    f"{dur_secs // 60}:{dur_secs % 60:02d}" if dur_secs else "Unknown"
+                    f"{dur_secs // 60}:{dur_secs % 60:02d}"
+                    if isinstance(dur_secs, int)
+                    else "Unknown"
                 )
-                table.add_row(str(idx), fix_arabic(entry.get("title", "Unknown")), duration)
+                table.add_row(
+                    str(idx), fix_arabic(str(entry.get("title", "Unknown"))), duration
+                )
 
         console.print(table)
         if video_count > 10:
             console.print(f"[dim]... and {video_count - 10} more videos[/dim]")
     else:
-        title = fix_arabic(info.get("title", "Unknown Title"))
-        uploader = fix_arabic(info.get("uploader", "Unknown Uploader"))
+        title = fix_arabic(str(info.get("title", "Unknown Title")))
+        uploader = fix_arabic(str(info.get("uploader", "Unknown Uploader")))
         duration_secs = info.get("duration")
         duration = (
             f"{duration_secs // 60}:{duration_secs % 60:02d}"
-            if duration_secs
+            if isinstance(duration_secs, int)
             else "Unknown"
         )
-        views = (
-            f"{info.get('view_count', 0):,}" if info.get("view_count") else "Unknown"
-        )
-        upload_date = info.get("upload_date", "Unknown")
+        view_count = info.get("view_count")
+        views = f"{view_count:,}" if isinstance(view_count, int) else "Unknown"
+        upload_date = str(info.get("upload_date", "Unknown"))
         if len(upload_date) == 8:
             upload_date = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:]}"
 
-        description = info.get("description", "")
+        description = str(info.get("description", ""))
         desc_lines = description.split("\n")
         desc_summary = "\n".join(desc_lines[:3])
         if len(desc_lines) > 3 or len(desc_summary) > 200:
@@ -505,7 +536,7 @@ def print_video_info(info: dict, console: Console):
             )
         )
 
-        formats = info.get("formats", [])
+        formats: list[dict[str, Any]] = info.get("formats", [])
         table = Table(title="Available Formats", box=box.ROUNDED)
         table.add_column("Format ID", style="cyan")
         table.add_column("Ext", style="green")
@@ -515,18 +546,20 @@ def print_video_info(info: dict, console: Console):
 
         # Show the 15 formats (worst to best)
         for f in formats[-15:]:
-            fid = f.get("format_id", "N/A")
-            ext = f.get("ext", "N/A")
-            res = f.get("resolution") or f"{f.get('width', '?')}x{f.get('height', '?')}"
+            fid = str(f.get("format_id", "N/A"))
+            ext = str(f.get("ext", "N/A"))
+            res = str(
+                f.get("resolution") or f"{f.get('width', '?')}x{f.get('height', '?')}"
+            )
             if res == "?x?":
                 res = "audio only" if f.get("vcodec") == "none" else "N/A"
 
-            vcodec = f.get("vcodec", "none")
-            acodec = f.get("acodec", "none")
+            vcodec = str(f.get("vcodec", "none"))
+            acodec = str(f.get("acodec", "none"))
             codec = f"V:{vcodec.split('.')[0]} A:{acodec.split('.')[0]}"
 
             size_bytes = f.get("filesize") or f.get("filesize_approx")
-            if size_bytes:
+            if isinstance(size_bytes, (int, float)):
                 size_mb = size_bytes / (1024 * 1024)
                 size = f"{size_mb:.1f} MB"
             else:
@@ -538,16 +571,16 @@ def print_video_info(info: dict, console: Console):
 
 
 def do_download_interactive(
-    url: str, info: Optional[dict] = None, console: Optional[Console] = None
-):
+    url: str, info: dict[str, Any] | None = None, console: Console | None = None
+) -> None:
     """Sub-menu to choose download settings interactively."""
-    global SESSION_COOKIES_BROWSER
-    if not console:
+    global session_cookies_browser
+    if console is None:
         console = Console()
-    if not info:
+    if info is None:
         with console.status("[bold blue]Fetching metadata...[/bold blue]"):
             try:
-                info = get_video_info(url, cookies_from_browser=SESSION_COOKIES_BROWSER)
+                info = get_video_info(url, cookies_from_browser=session_cookies_browser)
             except Exception as e:
                 console.print(
                     f"[bold red]Error: Failed to fetch metadata: {e}[/bold red]"
@@ -583,7 +616,7 @@ def do_download_interactive(
     console.print(
         Panel(
             menu_table,
-            title=f"[bold magenta]📥 Download Settings for: {fix_arabic(info.get('title', 'Video')[:50])}...[/bold magenta]",
+            title=f"[bold magenta]📥 Download Settings for: {fix_arabic(str(info.get('title', 'Video'))[:50])}...[/bold magenta]",
             border_style="magenta",
             expand=False,
         )
@@ -593,7 +626,7 @@ def do_download_interactive(
         "Select download type", choices=["1", "2", "3", "4", "5", "6"], default="1"
     )
 
-    opts = {}
+    opts: dict[str, Any] = {}
     if choice == "1":
         pass
     elif choice == "2":
@@ -608,7 +641,7 @@ def do_download_interactive(
         else:
             choices = get_universal_mp4_choices(info)
             console.print("\n[bold]Available Universal H.264 + AAC resolutions:[/bold]")
-            for idx, (display, code) in enumerate(choices, 1):
+            for idx, (display, _) in enumerate(choices, 1):
                 console.print(f"  [cyan]{idx}[/cyan]. {display}")
             console.print(f"  [cyan]{len(choices) + 1}[/cyan]. [red]↩ Cancel[/red]")
 
@@ -631,27 +664,29 @@ def do_download_interactive(
                 "[yellow]⚠️ Interactive format selection is only supported for single videos. Downloading best quality instead.[/yellow]"
             )
         else:
-            choices = get_interactive_format_choices(info)
+            choices_list = get_interactive_format_choices(info)
             console.print("\n[bold]Available formats for this video:[/bold]")
-            for idx, (display, code, merge_ext) in enumerate(choices, 1):
+            for idx, (display, _, _) in enumerate(choices_list, 1):
                 console.print(f"  [cyan]{idx}[/cyan]. {display}")
-            console.print(f"  [cyan]{len(choices) + 1}[/cyan]. [red]↩ Cancel[/red]")
+            console.print(
+                f"  [cyan]{len(choices_list) + 1}[/cyan]. [red]↩ Cancel[/red]"
+            )
 
             while True:
                 choice_idx = IntPrompt.ask("Select format number", default=1)
-                if 1 <= choice_idx <= len(choices) + 1:
+                if 1 <= choice_idx <= len(choices_list) + 1:
                     break
                 console.print(
-                    f"[bold red]❌ Invalid selection. Please enter a number between 1 and {len(choices) + 1}.[/bold red]"
+                    f"[bold red]❌ Invalid selection. Please enter a number between 1 and {len(choices_list) + 1}.[/bold red]"
                 )
 
-            if choice_idx == len(choices) + 1:
+            if choice_idx == len(choices_list) + 1:
                 return
-            selected_choice = choices[choice_idx - 1]
-            opts["format"] = selected_choice[1]
-            if selected_choice[2]:
-                opts["merge_output_format"] = selected_choice[2]
-                opts["remux_video"] = selected_choice[2]
+            selected_format = choices_list[choice_idx - 1]
+            opts["format"] = selected_format[1]
+            if selected_format[2]:
+                opts["merge_output_format"] = selected_format[2]
+                opts["remux_video"] = selected_format[2]
     elif choice == "4":
         format_code = Prompt.ask("Enter Format ID (e.g. '137+140', '22', or 'worst')")
         opts["format"] = format_code
@@ -662,9 +697,9 @@ def do_download_interactive(
         max_sec = IntPrompt.ask(
             "Enter maximum duration in seconds (0 for no limit)", default=0
         )
-        min_sec = min_sec if min_sec > 0 else None
-        max_sec = max_sec if max_sec > 0 else None
-        opts["match_filter"] = make_duration_filter(min_sec, max_sec)
+        min_sec_val = min_sec if min_sec > 0 else None
+        max_sec_val = max_sec if max_sec > 0 else None
+        opts["match_filter"] = make_duration_filter(min_sec_val, max_sec_val)
     elif choice == "6":
         return
 
@@ -677,7 +712,7 @@ def do_download_interactive(
 
     console.print("[blue]Starting download...[/blue]")
     error_code = download_video(
-        url, opts_override=opts, cookies_from_browser=SESSION_COOKIES_BROWSER
+        url, opts_override=opts, cookies_from_browser=session_cookies_browser
     )
     if error_code:
         console.print("[bold red]❌ Download failed![/bold red]")
@@ -685,14 +720,14 @@ def do_download_interactive(
         console.print("[bold green]✓ Download completed successfully![/bold green]")
 
 
-def run_interactive_menu():
+def run_interactive_menu() -> None:
     """Runs the main CLI prompt-driven dashboard loop."""
-    global SESSION_COOKIES_BROWSER
+    global session_cookies_browser
     console = Console()
     while True:
         cookies_status = (
-            f"[bold green]{SESSION_COOKIES_BROWSER}[/bold green]"
-            if SESSION_COOKIES_BROWSER
+            f"[bold green]{session_cookies_browser}[/bold green]"
+            if session_cookies_browser
             else "[yellow]None[/yellow]"
         )
 
@@ -740,7 +775,7 @@ def run_interactive_menu():
             with console.status("[bold blue]Fetching metadata...[/bold blue]"):
                 try:
                     info = get_video_info(
-                        url, cookies_from_browser=SESSION_COOKIES_BROWSER
+                        url, cookies_from_browser=session_cookies_browser
                     )
                 except Exception as e:
                     console.print(f"[bold red]Error: Extraction failed: {e}[/bold red]")
@@ -757,16 +792,14 @@ def run_interactive_menu():
             )
 
             if sub_choice == "1":
+                title_val = str(info.get("title", "video"))
                 title_clean = "".join(
-                    [
-                        c
-                        for c in info.get("title", "video")
-                        if c.isalnum() or c in " ._-"
-                    ]
+                    [c for c in title_val if c.isalnum() or c in " ._-"]
                 ).strip()
                 filename = f"{title_clean}.info.json"
                 with open(filename, "w", encoding="utf-8") as f:
-                    json.dump(yt_dlp.YoutubeDL().sanitize_info(info), f, indent=4)
+                    sanitized = yt_dlp.YoutubeDL().sanitize_info(cast(Any, info))
+                    json.dump(sanitized, f, indent=4)
                 console.print(
                     f"[bold green]✓[/bold green] Metadata saved to [cyan]{filename}[/cyan]"
                 )
@@ -785,7 +818,7 @@ def run_interactive_menu():
                 default="m4a",
             )
             console.print(f"[blue]Starting audio download ({codec})...[/blue]")
-            download_audio(url, codec, cookies_from_browser=SESSION_COOKIES_BROWSER)
+            _ = download_audio(url, codec, cookies_from_browser=session_cookies_browser)
 
         elif choice == "4":
             info_file = Prompt.ask("Enter path to info.json file")
@@ -793,8 +826,8 @@ def run_interactive_menu():
                 console.print(f"[bold red]File not found: {info_file}[/bold red]")
                 continue
             console.print(f"[blue]Downloading using {info_file}...[/blue]")
-            download_from_info_json(
-                info_file, cookies_from_browser=SESSION_COOKIES_BROWSER
+            _ = download_from_info_json(
+                info_file, cookies_from_browser=session_cookies_browser
             )
 
         elif choice == "5":
@@ -811,9 +844,9 @@ def run_interactive_menu():
                 ],
                 default="none",
             )
-            SESSION_COOKIES_BROWSER = None if browser == "none" else browser
+            session_cookies_browser = None if browser == "none" else browser
             console.print(
-                f"[bold green]✓ Session browser cookies set to: {SESSION_COOKIES_BROWSER}[/bold green]"
+                f"[bold green]✓ Session browser cookies set to: {session_cookies_browser}[/bold green]"
             )
 
         elif choice == "6":
@@ -827,7 +860,7 @@ def run_interactive_menu():
 
 
 @app.callback(invoke_without_command=True)
-def main(ctx: typer.Context):
+def main(ctx: typer.Context) -> None:
     """
     Interactive yt-dlp interface. Run without arguments to launch the interactive menu.
     """
@@ -836,7 +869,7 @@ def main(ctx: typer.Context):
 
 
 @app.command(name="interactive")
-def interactive_cmd():
+def interactive_cmd() -> None:
     """
     Launch the interactive wizard.
     """
@@ -845,19 +878,26 @@ def interactive_cmd():
 
 @app.command()
 def info(
-    url: str = Argument(..., help="The video URL to extract info from"),
-    save: bool = Option(False, "--save", "-s", help="Save info to a .info.json file"),
-    output: Optional[str] = Option(
-        None, "--output", "-o", help="Custom output filename for the JSON"
-    ),
-    cookies_from_browser: Optional[str] = Option(
-        None,
-        "--cookies-from-browser",
-        "-b",
-        help="Extract cookies from browser (chrome, firefox, edge, brave, safari, opera)",
-    ),
-    verbose: bool = Option(False, "--verbose", "-v", help="Show verbose output"),
-):
+    url: Annotated[str, Argument(help="The video URL to extract info from")],
+    save: Annotated[
+        bool, Option("--save", "-s", help="Save info to a .info.json file")
+    ] = False,
+    output: Annotated[
+        str | None,
+        Option("--output", "-o", help="Custom output filename for the JSON"),
+    ] = None,
+    cookies_from_browser: Annotated[
+        str | None,
+        Option(
+            "--cookies-from-browser",
+            "-b",
+            help="Extract cookies from browser (chrome, firefox, edge, brave, safari, opera)",
+        ),
+    ] = None,
+    verbose: Annotated[
+        bool, Option("--verbose", "-v", help="Show verbose output")
+    ] = False,
+) -> None:
     """
     Extract and display information about a video or playlist.
     """
@@ -874,7 +914,7 @@ def info(
     print_video_info(video_info, console)
 
     if save or output:
-        sanitized = yt_dlp.YoutubeDL().sanitize_info(video_info)
+        sanitized = yt_dlp.YoutubeDL().sanitize_info(cast(Any, video_info))
         out_filename = output or f"{video_info.get('title', 'video')}.info.json"
         out_filename = "".join(
             [c for c in out_filename if c.isalnum() or c in " ._-"]
@@ -889,45 +929,64 @@ def info(
 
 @app.command()
 def download(
-    url: Optional[str] = Argument(None, help="The video URL to download"),
-    info_json: Optional[str] = Option(
-        None, "--info-json", "-j", help="Path to info.json file to download from"
-    ),
-    format_code: Optional[str] = Option(
-        None, "--format", "-f", help="Format code (e.g. 'bestvideo+bestaudio')"
-    ),
-    custom_format: bool = Option(
-        False,
-        "--custom-selector",
-        "-c",
-        help="Use custom format selector to prefer MP4/WebM and avoid MKV",
-    ),
-    audio_only: bool = Option(
-        False, "--audio", "-a", help="Download and extract audio only"
-    ),
-    audio_codec: str = Option(
-        "m4a", "--audio-format", help="Audio format codec to extract (e.g. m4a, mp3)"
-    ),
-    min_duration: Optional[int] = Option(
-        None, "--min-duration", help="Skip videos shorter than this duration in seconds"
-    ),
-    max_duration: Optional[int] = Option(
-        None, "--max-duration", help="Skip videos longer than this duration in seconds"
-    ),
-    cookies_from_browser: Optional[str] = Option(
-        None,
-        "--cookies-from-browser",
-        "-b",
-        help="Extract cookies from browser (chrome, firefox, edge, brave, safari, opera)",
-    ),
-    sponsorblock: bool = Option(
-        False,
-        "--sponsorblock",
-        "-s",
-        help="Skip sponsor and self-promotion segments using SponsorBlock",
-    ),
-    verbose: bool = Option(False, "--verbose", "-v", help="Show verbose output"),
-):
+    url: Annotated[str | None, Argument(help="The video URL to download")] = None,
+    info_json: Annotated[
+        str | None,
+        Option("--info-json", "-j", help="Path to info.json file to download from"),
+    ] = None,
+    format_code: Annotated[
+        str | None,
+        Option("--format", "-f", help="Format code (e.g. 'bestvideo+bestaudio')"),
+    ] = None,
+    custom_format: Annotated[
+        bool,
+        Option(
+            "--custom-selector",
+            "-c",
+            help="Use custom format selector to prefer MP4/WebM and avoid MKV",
+        ),
+    ] = False,
+    audio_only: Annotated[
+        bool, Option("--audio", "-a", help="Download and extract audio only")
+    ] = False,
+    audio_codec: Annotated[
+        str,
+        Option("--audio-format", help="Audio format codec to extract (e.g. m4a, mp3)"),
+    ] = "m4a",
+    min_duration: Annotated[
+        int | None,
+        Option(
+            "--min-duration",
+            help="Skip videos shorter than this duration in seconds",
+        ),
+    ] = None,
+    max_duration: Annotated[
+        int | None,
+        Option(
+            "--max-duration",
+            help="Skip videos longer than this duration in seconds",
+        ),
+    ] = None,
+    cookies_from_browser: Annotated[
+        str | None,
+        Option(
+            "--cookies-from-browser",
+            "-b",
+            help="Extract cookies from browser (chrome, firefox, edge, brave, safari, opera)",
+        ),
+    ] = None,
+    sponsorblock: Annotated[
+        bool,
+        Option(
+            "--sponsorblock",
+            "-s",
+            help="Skip sponsor and self-promotion segments using SponsorBlock",
+        ),
+    ] = False,
+    verbose: Annotated[
+        bool, Option("--verbose", "-v", help="Show verbose output")
+    ] = False,
+) -> None:
     """
     Download a video, playlist, or download using a saved info.json.
     """
@@ -939,7 +998,7 @@ def download(
         )
         raise typer.Exit(code=1)
 
-    opts = {}
+    opts: dict[str, Any] = {}
 
     # Setup formats
     if audio_only:
@@ -978,6 +1037,9 @@ def download(
             verbose=verbose,
         )
     else:
+        if not url:
+            console.print("[bold red]Error: Video URL is required.[/bold red]")
+            raise typer.Exit(code=1)
         console.print(f"[blue]Starting download for: [cyan]{url}[/cyan][/blue]")
         error_code = download_video(
             url,
@@ -997,24 +1059,30 @@ def download(
 
 @app.command()
 def audio(
-    url: str = Argument(..., help="The video URL to extract audio from"),
-    codec: str = Option(
-        "m4a", "--codec", "-c", help="Audio codec (m4a, mp3, wav, flac, etc.)"
-    ),
-    cookies_from_browser: Optional[str] = Option(
-        None,
-        "--cookies-from-browser",
-        "-b",
-        help="Extract cookies from browser (chrome, firefox, edge, brave, safari, opera)",
-    ),
-    sponsorblock: bool = Option(
-        False,
-        "--sponsorblock",
-        "-s",
-        help="Skip sponsor and self-promotion segments using SponsorBlock",
-    ),
-    verbose: bool = Option(False, "--verbose", "-v", help="Show verbose output"),
-):
+    url: Annotated[str, Argument(help="The video URL to extract audio from")],
+    codec: Annotated[
+        str, Option("--codec", "-c", help="Audio codec (m4a, mp3, wav, flac, etc.)")
+    ] = "m4a",
+    cookies_from_browser: Annotated[
+        str | None,
+        Option(
+            "--cookies-from-browser",
+            "-b",
+            help="Extract cookies from browser (chrome, firefox, edge, brave, safari, opera)",
+        ),
+    ] = None,
+    sponsorblock: Annotated[
+        bool,
+        Option(
+            "--sponsorblock",
+            "-s",
+            help="Skip sponsor and self-promotion segments using SponsorBlock",
+        ),
+    ] = False,
+    verbose: Annotated[
+        bool, Option("--verbose", "-v", help="Show verbose output")
+    ] = False,
+) -> None:
     """
     Extract and download audio from a video.
     """

@@ -22,4 +22,12 @@ build-backend = "setuptools.build_meta"
 [tool.uv]
 package = true
 
-
+[tool.basedpyright]
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.13"
+exclude = [
+    "build",
+    ".venv",
+]
