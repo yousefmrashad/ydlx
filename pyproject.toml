@@ -1,19 +1,20 @@
 [project]
-name = "yt-dlp-int"
+name = "ydlx"
 version = "0.1.0"
-description = "Add your description here"
+description = "An interactive, feature-rich CLI dashboard and downloader for yt-dlp"
 readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
     "typer>=0.26.8",
     "yt-dlp>=2026.7.4",
     "rich>=13.7.0",
-    "arabic-reshaper>=3.0.1",
-    "python-bidi>=0.6.11",
+    "curl-cffi>=0.7.0",
 ]
 
 [project.scripts]
-yt-dlp-int = "main:app"
+ydlx = "main:app"
 
 [build-system]
 requires = ["setuptools>=61.0.0"]

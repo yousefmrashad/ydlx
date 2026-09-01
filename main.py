@@ -30,8 +30,8 @@ from rich.table import Table
 from typer import Argument, Option, Typer
 
 app = Typer(
-    name="yt-dlp-cli",
-    help="An interactive and feature-rich CLI wrapper for yt-dlp.",
+    name="ydlx",
+    help="An interactive and feature-rich CLI wrapper and dashboard for yt-dlp.",
     no_args_is_help=False,
 )
 
@@ -419,6 +419,7 @@ def download_audio(
     format_codec: str = "m4a",
     cookies_from_browser: str | None = None,
     output_dir: str | Path | None = None,
+    opts_override: dict[str, Any] | None = None,
     sponsorblock: bool = False,
     verbose: bool = False,
 ) -> int:
@@ -435,6 +436,9 @@ def download_audio(
     }
     if sponsorblock:
         opts["sponsorblock_skip"] = ["sponsor", "selfpromo"]
+
+    if opts_override:
+        opts.update(opts_override)
 
     return download_video(
         url,
@@ -476,6 +480,89 @@ def download_from_info_json(
     except Exception as e:
         Console().print(f"[bold red]❌ Download error: {e}[/bold red]")
         return 1
+
+
+def configure_subtitles(
+    opts: dict[str, Any],
+    *,
+    write_subs: bool = False,
+    embed_subs: bool = False,
+    auto_subs: bool = False,
+    sub_langs: str = "en",
+    sub_format: str = "srt",
+    keep_subs: bool = False,
+) -> None:
+    """Configures subtitle download, conversion, and embedding options in ydl_opts."""
+    if not (write_subs or embed_subs):
+        return
+
+    opts["writesubtitles"] = True
+    if auto_subs:
+        opts["writeautomaticsub"] = True
+
+    langs = [lang.strip() for lang in sub_langs.split(",") if lang.strip()]
+    opts["subtitleslangs"] = langs if langs else ["en"]
+    opts["subtitlesformat"] = sub_format or "srt"
+
+    if "postprocessors" not in opts:
+        opts["postprocessors"] = []
+
+    # Convert subtitles to srt if requested
+    if sub_format.lower() in ("srt", "vtt"):
+        opts["postprocessors"].append(
+            {
+                "key": "FFmpegSubtitlesConvertor",
+                "format": sub_format.lower(),
+            }
+        )
+
+    if embed_subs:
+        opts["postprocessors"].append(
+            {
+                "key": "FFmpegEmbedSubtitle",
+                "already_have_subtitle": keep_subs or write_subs,
+            }
+        )
+
+
+def download_subtitles_only(
+    url: str,
+    sub_langs: str = "en",
+    auto_subs: bool = True,
+    sub_format: str = "srt",
+    cookies_from_browser: str | None = None,
+    output_dir: str | Path | None = None,
+    verbose: bool = False,
+) -> int:
+    """Download subtitles only without downloading the media."""
+    target_dir = Path(output_dir) if output_dir else get_default_video_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    opts: dict[str, Any] = {
+        "skip_download": True,
+        "writesubtitles": True,
+        "subtitlesformat": sub_format,
+    }
+    if auto_subs:
+        opts["writeautomaticsub"] = True
+
+    langs = [lang.strip() for lang in sub_langs.split(",") if lang.strip()]
+    opts["subtitleslangs"] = langs if langs else ["en"]
+
+    opts["postprocessors"] = [
+        {
+            "key": "FFmpegSubtitlesConvertor",
+            "format": sub_format,
+        }
+    ]
+
+    return download_video(
+        url,
+        opts_override=opts,
+        cookies_from_browser=cookies_from_browser,
+        output_dir=target_dir,
+        verbose=verbose,
+    )
 
 
 # =====================================================================
@@ -542,11 +629,28 @@ def print_video_info(info: dict[str, Any], console: Console) -> None:
         if len(desc_lines) > 3 or len(desc_summary) > 200:
             desc_summary = desc_summary[:200] + "..."
 
+        subtitles_dict: dict[str, Any] = info.get("subtitles") or {}
+        auto_captions_dict: dict[str, Any] = info.get("automatic_captions") or {}
+        sub_langs = list(subtitles_dict.keys())
+        auto_langs = list(auto_captions_dict.keys())
+
+        subs_parts: list[str] = []
+        if sub_langs:
+            subs_parts.append(
+                f"Official: {', '.join(sub_langs[:8])}{'...' if len(sub_langs) > 8 else ''}"
+            )
+        if auto_langs:
+            subs_parts.append(
+                f"Auto: {', '.join(auto_langs[:8])}{'...' if len(auto_langs) > 8 else ''}"
+            )
+        subs_text = " | ".join(subs_parts) if subs_parts else "None available"
+
         console.print(
             Panel(
                 f"[bold cyan]{title}[/bold cyan]\n"
                 f"[bold]Channel:[/bold] {uploader}\n"
-                f"[bold]Duration:[/bold] {duration} | [bold]Views:[/bold] {views} | [bold]Uploaded:[/bold] {upload_date}\n\n"
+                f"[bold]Duration:[/bold] {duration} | [bold]Views:[/bold] {views} | [bold]Uploaded:[/bold] {upload_date}\n"
+                f"[bold]Subtitles:[/bold] {subs_text}\n\n"
                 f"[dim]{desc_summary}[/dim]",
                 title="Video Metadata",
                 expand=False,
@@ -731,6 +835,33 @@ def do_download_interactive(
     if skip_sponsors:
         opts["sponsorblock_skip"] = ["sponsor", "selfpromo"]
 
+    # Ask about Subtitles (if downloading video)
+    if target_dir == get_default_video_dir():
+        want_subs = Confirm.ask("Download / embed subtitles?", default=False)
+        if want_subs:
+            sub_mode = Prompt.ask(
+                "Subtitle placement",
+                choices=["embed", "external", "both"],
+                default="embed",
+            )
+            sub_langs = Prompt.ask(
+                "Subtitle languages (comma-separated, e.g. 'en', 'ar', 'all')",
+                default="en",
+            )
+            auto_subs = Confirm.ask(
+                "Include auto-generated captions if official subtitles are missing?",
+                default=True,
+            )
+            configure_subtitles(
+                opts,
+                write_subs=(sub_mode in ("external", "both")),
+                embed_subs=(sub_mode in ("embed", "both")),
+                auto_subs=auto_subs,
+                sub_langs=sub_langs,
+                sub_format="srt",
+                keep_subs=(sub_mode == "both"),
+            )
+
     console.print(f"[blue]Starting download to [cyan]{target_dir}[/cyan]...[/blue]")
     error_code = download_video(
         url,
@@ -769,29 +900,35 @@ def run_interactive_menu() -> None:
             "[magenta]Extract and convert audio tracks (MP3/M4A)[/magenta]",
         )
         menu_table.add_row(
-            "[bold bright_yellow]4.[/bold bright_yellow] 📄 Download from info.json",
+            "[bold yellow]4.[/bold yellow] 💬 Download Subtitles Only",
+            "[yellow]Extract subtitles (.srt) without downloading media[/yellow]",
+        )
+        menu_table.add_row(
+            "[bold bright_yellow]5.[/bold bright_yellow] 📄 Download from info.json",
             "[bright_yellow]Download using cached info.json metadata[/bright_yellow]",
         )
         menu_table.add_row(
-            "[bold blue]5.[/bold blue] 🍪 Set Browser Cookies Source",
+            "[bold blue]6.[/bold blue] 🍪 Set Browser Cookies Source",
             f"[blue]Load cookies from browser (Active: {cookies_status})[/blue]",
         )
         menu_table.add_row(
-            "[bold red]6.[/bold red] ❌ Exit", "[red]Close the application[/red]"
+            "[bold red]7.[/bold red] ❌ Exit", "[red]Close the application[/red]"
         )
 
         console.print("\n")
         console.print(
             Panel(
                 menu_table,
-                title="[bold cyan]⚡ yt-dlp Interactive Dashboard ⚡[/bold cyan]",
+                title="[bold cyan]⚡ ydlx Interactive Dashboard ⚡[/bold cyan]",
                 border_style="cyan",
                 expand=False,
             )
         )
 
         choice = Prompt.ask(
-            "Select an option", choices=["1", "2", "3", "4", "5", "6"], default="1"
+            "Select an option",
+            choices=["1", "2", "3", "4", "5", "6", "7"],
+            default="1",
         )
 
         if choice == "1":
@@ -810,9 +947,10 @@ def run_interactive_menu() -> None:
             console.print("\n[bold]Submenu Actions:[/bold]")
             console.print("1. [green]💾 Save metadata to info.json[/green]")
             console.print("2. [green]📥 Download this video[/green]")
-            console.print("3. [red]↩ Back to main menu[/red]")
+            console.print("3. [yellow]💬 Download subtitles only[/yellow]")
+            console.print("4. [red]↩ Back to main menu[/red]")
             sub_choice = Prompt.ask(
-                "Select action", choices=["1", "2", "3"], default="1"
+                "Select action", choices=["1", "2", "3", "4"], default="1"
             )
 
             if sub_choice == "1":
@@ -829,6 +967,26 @@ def run_interactive_menu() -> None:
                 )
             elif sub_choice == "2":
                 do_download_interactive(url, info, console)
+            elif sub_choice == "3":
+                sub_langs = Prompt.ask(
+                    "Subtitle languages (comma-separated, e.g. 'en', 'ar', 'all')",
+                    default="en",
+                )
+                auto_subs = Confirm.ask(
+                    "Include auto-generated captions if official subtitles are missing?",
+                    default=True,
+                )
+                video_dir = get_default_video_dir()
+                console.print(
+                    f"[blue]Downloading subtitles ({sub_langs}) to [cyan]{video_dir}[/cyan]...[/blue]"
+                )
+                _ = download_subtitles_only(
+                    url,
+                    sub_langs=sub_langs,
+                    auto_subs=auto_subs,
+                    cookies_from_browser=session_cookies_browser,
+                    output_dir=video_dir,
+                )
 
         elif choice == "2":
             url = Prompt.ask("Enter video URL")
@@ -853,6 +1011,28 @@ def run_interactive_menu() -> None:
             )
 
         elif choice == "4":
+            url = Prompt.ask("Enter video URL")
+            sub_langs = Prompt.ask(
+                "Subtitle languages (comma-separated, e.g. 'en', 'ar', 'all')",
+                default="en",
+            )
+            auto_subs = Confirm.ask(
+                "Include auto-generated captions if official subtitles are missing?",
+                default=True,
+            )
+            video_dir = get_default_video_dir()
+            console.print(
+                f"[blue]Downloading subtitles ({sub_langs}) to [cyan]{video_dir}[/cyan]...[/blue]"
+            )
+            _ = download_subtitles_only(
+                url,
+                sub_langs=sub_langs,
+                auto_subs=auto_subs,
+                cookies_from_browser=session_cookies_browser,
+                output_dir=video_dir,
+            )
+
+        elif choice == "5":
             info_file = Prompt.ask("Enter path to info.json file")
             if not os.path.exists(info_file):
                 console.print(f"[bold red]File not found: {info_file}[/bold red]")
@@ -867,7 +1047,7 @@ def run_interactive_menu() -> None:
                 output_dir=video_dir,
             )
 
-        elif choice == "5":
+        elif choice == "6":
             browser = Prompt.ask(
                 "Select browser to load cookies from (helps avoid 403 Forbidden errors)",
                 choices=[
@@ -886,7 +1066,7 @@ def run_interactive_menu() -> None:
                 f"[bold green]✓ Session browser cookies set to: {session_cookies_browser}[/bold green]"
             )
 
-        elif choice == "6":
+        elif choice == "7":
             console.print("[yellow]Goodbye![/yellow]")
             break
 
@@ -1028,6 +1208,42 @@ def download(
             help="Skip sponsor and self-promotion segments using SponsorBlock",
         ),
     ] = False,
+    write_subs: Annotated[
+        bool,
+        Option(
+            "--subs",
+            "-S",
+            help="Download subtitles file (.srt) alongside the video",
+        ),
+    ] = False,
+    embed_subs: Annotated[
+        bool,
+        Option(
+            "--embed-subs",
+            help="Embed subtitles directly into the video container",
+        ),
+    ] = False,
+    auto_subs: Annotated[
+        bool,
+        Option(
+            "--auto-subs",
+            help="Include auto-generated subtitles if official subtitles are not found",
+        ),
+    ] = False,
+    sub_langs: Annotated[
+        str,
+        Option(
+            "--sub-langs",
+            help="Comma-separated subtitle languages (e.g. 'en', 'ar', 'all')",
+        ),
+    ] = "en",
+    sub_format: Annotated[
+        str,
+        Option(
+            "--sub-format",
+            help="Preferred subtitle format (srt, vtt, best)",
+        ),
+    ] = "srt",
     verbose: Annotated[
         bool, Option("--verbose", "-v", help="Show verbose output")
     ] = False,
@@ -1074,6 +1290,18 @@ def download(
     # Setup SponsorBlock
     if sponsorblock:
         opts["sponsorblock_skip"] = ["sponsor", "selfpromo"]
+
+    # Setup Subtitles
+    if write_subs or embed_subs:
+        configure_subtitles(
+            opts,
+            write_subs=write_subs,
+            embed_subs=embed_subs,
+            auto_subs=auto_subs,
+            sub_langs=sub_langs,
+            sub_format=sub_format,
+            keep_subs=write_subs,
+        )
 
     # Perform download
     if info_json:
@@ -1128,6 +1356,28 @@ def audio(
     codec: Annotated[
         str, Option("--codec", "-c", help="Audio codec (m4a, mp3, wav, flac, etc.)")
     ] = "m4a",
+    subtitles: Annotated[
+        bool,
+        Option(
+            "--subs",
+            "-S",
+            help="Download subtitles/lyrics alongside audio if available",
+        ),
+    ] = False,
+    sub_langs: Annotated[
+        str,
+        Option(
+            "--sub-langs",
+            help="Comma-separated subtitle languages (e.g. 'en', 'ar', 'all')",
+        ),
+    ] = "en",
+    auto_subs: Annotated[
+        bool,
+        Option(
+            "--auto-subs",
+            help="Include auto-generated captions if official subtitles are missing",
+        ),
+    ] = False,
     cookies_from_browser: Annotated[
         str | None,
         Option(
@@ -1156,11 +1406,24 @@ def audio(
     console.print(
         f"[blue]Extracting audio ({codec}) to [cyan]{target_dir}[/cyan] from: [cyan]{url}[/cyan][/blue]"
     )
+    opts: dict[str, Any] = {}
+    if subtitles:
+        configure_subtitles(
+            opts,
+            write_subs=True,
+            embed_subs=False,
+            auto_subs=auto_subs,
+            sub_langs=sub_langs,
+            sub_format="srt",
+            keep_subs=True,
+        )
+
     error_code = download_audio(
         url,
         format_codec=codec,
         cookies_from_browser=cookies_from_browser,
         output_dir=target_dir,
+        opts_override=opts if opts else None,
         sponsorblock=sponsorblock,
         verbose=verbose,
     )
@@ -1171,6 +1434,72 @@ def audio(
         console.print(
             "[bold green]✓ Audio extraction completed successfully![/bold green]"
         )
+
+
+@app.command(name="subs")
+def subs(
+    url: Annotated[str, Argument(help="The video URL to download subtitles from")],
+    output_dir: Annotated[
+        str | None,
+        Option(
+            "--output-dir",
+            "-o",
+            help="Target directory for downloaded subtitles (defaults to ~/Downloads/video)",
+        ),
+    ] = None,
+    langs: Annotated[
+        str,
+        Option(
+            "--langs",
+            "-l",
+            help="Comma-separated subtitle languages (e.g. 'en', 'ar', 'all')",
+        ),
+    ] = "en",
+    auto: Annotated[
+        bool,
+        Option(
+            "--auto/--no-auto",
+            help="Include auto-generated subtitles if official not available",
+        ),
+    ] = True,
+    format: Annotated[
+        str,
+        Option("--format", "-f", help="Subtitle format (srt, vtt, best)"),
+    ] = "srt",
+    cookies_from_browser: Annotated[
+        str | None,
+        Option(
+            "--cookies-from-browser",
+            "-b",
+            help="Extract cookies from browser (chrome, firefox, edge, brave, safari, opera)",
+        ),
+    ] = None,
+    verbose: Annotated[
+        bool, Option("--verbose", "-v", help="Show verbose output")
+    ] = False,
+) -> None:
+    """
+    Download subtitles only without downloading the video or audio media.
+    """
+    console = Console()
+    target_dir = Path(output_dir) if output_dir else get_default_video_dir()
+    console.print(
+        f"[blue]Downloading subtitles ({langs}, {format}) to [cyan]{target_dir}[/cyan] from: [cyan]{url}[/cyan][/blue]"
+    )
+    error_code = download_subtitles_only(
+        url,
+        sub_langs=langs,
+        auto_subs=auto,
+        sub_format=format,
+        cookies_from_browser=cookies_from_browser,
+        output_dir=target_dir,
+        verbose=verbose,
+    )
+    if error_code:
+        console.print("[bold red]❌ Subtitles download failed![/bold red]")
+        raise typer.Exit(code=error_code)
+    else:
+        console.print("[bold green]✓ Subtitles downloaded successfully![/bold green]")
 
 
 if __name__ == "__main__":
