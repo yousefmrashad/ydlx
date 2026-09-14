@@ -490,7 +490,6 @@ def configure_subtitles(
     auto_subs: bool = False,
     sub_langs: str = "en",
     sub_format: str = "srt",
-    keep_subs: bool = False,
 ) -> None:
     """Configures subtitle download, conversion, and embedding options in ydl_opts."""
     if not (write_subs or embed_subs):
@@ -520,7 +519,7 @@ def configure_subtitles(
         opts["postprocessors"].append(
             {
                 "key": "FFmpegEmbedSubtitle",
-                "already_have_subtitle": keep_subs or write_subs,
+                "already_have_subtitle": write_subs,
             }
         )
 
@@ -549,12 +548,16 @@ def download_subtitles_only(
     langs = [lang.strip() for lang in sub_langs.split(",") if lang.strip()]
     opts["subtitleslangs"] = langs if langs else ["en"]
 
-    opts["postprocessors"] = [
-        {
-            "key": "FFmpegSubtitlesConvertor",
-            "format": sub_format,
-        }
-    ]
+    # Only convert when the target format is a convertible subtitle container;
+    # anything else (e.g. "best") saves files in their native extracted format.
+    opts["postprocessors"] = []
+    if sub_format.lower() in ("srt", "vtt"):
+        opts["postprocessors"].append(
+            {
+                "key": "FFmpegSubtitlesConvertor",
+                "format": sub_format.lower(),
+            }
+        )
 
     return download_video(
         url,
@@ -859,7 +862,6 @@ def do_download_interactive(
                 auto_subs=auto_subs,
                 sub_langs=sub_langs,
                 sub_format="srt",
-                keep_subs=(sub_mode == "both"),
             )
 
     console.print(f"[blue]Starting download to [cyan]{target_dir}[/cyan]...[/blue]")
@@ -1300,7 +1302,6 @@ def download(
             auto_subs=auto_subs,
             sub_langs=sub_langs,
             sub_format=sub_format,
-            keep_subs=write_subs,
         )
 
     # Perform download
@@ -1415,7 +1416,6 @@ def audio(
             auto_subs=auto_subs,
             sub_langs=sub_langs,
             sub_format="srt",
-            keep_subs=True,
         )
 
     error_code = download_audio(

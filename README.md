@@ -26,6 +26,19 @@ A modern, fast, interactive CLI dashboard and downloader built on top of [yt-dlp
 ### Prerequisites
 Make sure **[FFmpeg](https://ffmpeg.org/)** is installed and accessible on your system `PATH`.
 
+### Install from PyPI (recommended)
+
+```bash
+# with uv
+uv tool install ydlx
+
+# or with pip
+pip install ydlx
+
+# or with pipx
+pipx install ydlx
+```
+
 ### Install from source (requires [uv](https://docs.astral.sh/uv/))
 
 Clone this repository and install it as an isolated tool:
