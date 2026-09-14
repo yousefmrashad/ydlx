@@ -1226,10 +1226,10 @@ def download(
     auto_subs: Annotated[
         bool,
         Option(
-            "--auto-subs",
+            "--auto-subs/--no-auto-subs",
             help="Include auto-generated subtitles if official subtitles are not found",
         ),
-    ] = False,
+    ] = True,
     sub_langs: Annotated[
         str,
         Option(
@@ -1374,10 +1374,10 @@ def audio(
     auto_subs: Annotated[
         bool,
         Option(
-            "--auto-subs",
+            "--auto-subs/--no-auto-subs",
             help="Include auto-generated captions if official subtitles are missing",
         ),
-    ] = False,
+    ] = True,
     cookies_from_browser: Annotated[
         str | None,
         Option(

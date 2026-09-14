@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-ydlx = "main:app"
+ydlx = "ydlx:app"
 
 [build-system]
 requires = ["setuptools>=61.0.0"]
