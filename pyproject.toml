@@ -13,6 +13,13 @@ dependencies = [
     "curl-cffi>=0.7.0",
 ]
 
+authors = [{ name = "Yousef Rashad", email = "yousefmrashad@proton.me" }]
+
+[project.urls]
+Homepage = "https://github.com/yousefmrashad/ydlx"
+Repository = "https://github.com/yousefmrashad/ydlx"
+Issues = "https://github.com/yousefmrashad/ydlx/issues"
+
 [project.scripts]
 ydlx = "ydlx:app"
 
