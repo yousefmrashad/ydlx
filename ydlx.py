@@ -319,6 +319,13 @@ def make_duration_filter(
     return duration_filter
 
 
+def make_audio_format_spec(format_codec: str) -> str:
+    """Returns the download format spec: native best m4a for m4a targets, bestaudio otherwise."""
+    if format_codec == "m4a":
+        return "bestaudio[ext=m4a]/bestaudio/best"
+    return "bestaudio/best"
+
+
 # =====================================================================
 # Platform-Agnostic Directory Helpers
 # =====================================================================
@@ -548,7 +555,7 @@ def download_audio(
     """Download and extract audio format only."""
     target_dir = Path(output_dir) if output_dir else get_default_music_dir()
     opts: dict[str, Any] = {
-        "format": "m4a/bestaudio/best",
+        "format": make_audio_format_spec(format_codec),
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -943,6 +950,7 @@ def do_download_interactive(
                 )
                 return
 
+    is_playlist = info.get("_type") == "playlist"
     menu_table = Table(show_header=False, box=box.SIMPLE, border_style="dim magenta")
     menu_table.add_row(
         "[bold cyan]1.[/bold cyan] 🚀 Best Quality",
@@ -956,13 +964,18 @@ def do_download_interactive(
         "[bold bright_yellow]3.[/bold bright_yellow] 🎯 Choose Specific Format ID",
         "[bright_yellow]Manually input a format code[/bright_yellow]",
     )
+    valid_choices = ["1", "2", "3"]
+    if is_playlist:
+        menu_table.add_row(
+            "[bold orange3]4.[/bold orange3] ⏱️  Filter by Duration",
+            "[orange3]Skip playlist videos outside a duration range[/orange3]",
+        )
+        valid_choices.append("4")
+    back_choice = str(len(valid_choices) + 1)
     menu_table.add_row(
-        "[bold orange3]4.[/bold orange3] ⏱️  Filter by Duration",
-        "[orange3]Filter downloads based on duration limits[/orange3]",
+        f"[bold red]{back_choice}.[/bold red] ↩ Back", "[red]Return to main menu[/red]"
     )
-    menu_table.add_row(
-        "[bold red]5.[/bold red] ↩ Back", "[red]Return to main menu[/red]"
-    )
+    valid_choices.append(back_choice)
 
     console.print("\n")
     console.print(
@@ -975,7 +988,7 @@ def do_download_interactive(
     )
 
     choice = Prompt.ask(
-        "Select download type", choices=["1", "2", "3", "4", "5"], default="1"
+        "Select download type", choices=valid_choices, default="1"
     )
 
     opts: dict[str, Any] = {}
@@ -1036,7 +1049,7 @@ def do_download_interactive(
     elif choice == "3":
         format_code = Prompt.ask("Enter Format ID (e.g. '137+140', '22', or 'worst')")
         opts["format"] = format_code
-    elif choice == "4":
+    elif choice == "4" and is_playlist:
         min_sec = IntPrompt.ask(
             "Enter minimum duration in seconds (0 for no limit)", default=60
         )
@@ -1046,7 +1059,7 @@ def do_download_interactive(
         min_sec_val = min_sec if min_sec > 0 else None
         max_sec_val = max_sec if max_sec > 0 else None
         opts["match_filter"] = make_duration_filter(min_sec_val, max_sec_val)
-    elif choice == "5":
+    else:
         return
 
     # Ask about SponsorBlock skipping
@@ -1069,6 +1082,9 @@ def do_download_interactive(
                 "Subtitle languages (comma-separated, e.g. 'en', 'ar', 'all')",
                 default="en",
             )
+            sub_format = Prompt.ask(
+                "Subtitle format", choices=["srt", "vtt", "best"], default="srt"
+            )
             auto_subs = Confirm.ask(
                 "Include auto-generated captions if official subtitles are missing?",
                 default=True,
@@ -1079,7 +1095,7 @@ def do_download_interactive(
                 embed_subs=(sub_mode in ("embed", "both")),
                 auto_subs=auto_subs,
                 sub_langs=sub_langs,
-                sub_format="srt",
+                sub_format=sub_format,
             )
 
     console.print(f"[blue]Starting download to [cyan]{target_dir}[/cyan]...[/blue]")
@@ -1119,7 +1135,7 @@ def run_interactive_menu() -> None:
         )
         menu_table.add_row(
             "[bold magenta]3.[/bold magenta] 🎵 Download Audio",
-            "[magenta]Extract and convert audio tracks (MP3/M4A)[/magenta]",
+            "[magenta]Extract and convert audio tracks (M4A/Opus/MP3)[/magenta]",
         )
         menu_table.add_row(
             "[bold yellow]4.[/bold yellow] 💬 Download Subtitles Only",
@@ -1170,7 +1186,7 @@ def run_interactive_menu() -> None:
             console.print("1. [cyan]💾 Save metadata to info.json[/cyan]")
             console.print("2. [green]📥 Download this video[/green]")
             console.print("3. [yellow]💬 Download subtitles only[/yellow]")
-            console.print("4. [magenta]🎵 Download audio (M4A/MP3)[/magenta]")
+            console.print("4. [magenta]🎵 Download audio (M4A/Opus/MP3)[/magenta]")
             console.print("5. [red]↩ Back to main menu[/red]")
             sub_choice = Prompt.ask(
                 "Select action", choices=["1", "2", "3", "4", "5"], default="1"
@@ -1199,6 +1215,9 @@ def run_interactive_menu() -> None:
                     "Include auto-generated captions if official subtitles are missing?",
                     default=True,
                 )
+                sub_format = Prompt.ask(
+                    "Subtitle format", choices=["srt", "vtt", "best"], default="srt"
+                )
                 video_dir = get_default_video_dir()
                 console.print(
                     f"[blue]Downloading subtitles ({sub_langs}) to [cyan]{video_dir}[/cyan]...[/blue]"
@@ -1209,14 +1228,18 @@ def run_interactive_menu() -> None:
                     console,
                     langs=sub_langs,
                     auto_subs=auto_subs,
-                    sub_format="srt",
+                    sub_format=sub_format,
                     cookies_from_browser=session_cookies_browser,
                 )
             elif sub_choice == "4":
                 codec = Prompt.ask(
                     "Select audio format",
-                    choices=["m4a", "mp3", "wav", "flac"],
+                    choices=["m4a", "opus", "mp3", "wav", "flac"],
                     default="m4a",
+                )
+                skip_sponsors = Confirm.ask(
+                    "Skip sponsor and self-promotion segments using SponsorBlock?",
+                    default=False,
                 )
                 music_dir = get_default_music_dir()
                 console.print(
@@ -1227,6 +1250,7 @@ def run_interactive_menu() -> None:
                     codec,
                     cookies_from_browser=session_cookies_browser,
                     output_dir=music_dir,
+                    sponsorblock=skip_sponsors,
                 )
 
         elif choice == "2":
@@ -1237,8 +1261,12 @@ def run_interactive_menu() -> None:
             url = prompt_for_url(console)
             codec = Prompt.ask(
                 "Select audio format",
-                choices=["m4a", "mp3", "wav", "flac"],
+                choices=["m4a", "opus", "mp3", "wav", "flac"],
                 default="m4a",
+            )
+            skip_sponsors = Confirm.ask(
+                "Skip sponsor and self-promotion segments using SponsorBlock?",
+                default=False,
             )
             music_dir = get_default_music_dir()
             console.print(
@@ -1249,6 +1277,7 @@ def run_interactive_menu() -> None:
                 codec,
                 cookies_from_browser=session_cookies_browser,
                 output_dir=music_dir,
+                sponsorblock=skip_sponsors,
             )
 
         elif choice == "4":
@@ -1261,6 +1290,9 @@ def run_interactive_menu() -> None:
                 "Include auto-generated captions if official subtitles are missing?",
                 default=True,
             )
+            sub_format = Prompt.ask(
+                "Subtitle format", choices=["srt", "vtt", "best"], default="srt"
+            )
             video_dir = get_default_video_dir()
             console.print(
                 f"[blue]Downloading subtitles ({sub_langs}) to [cyan]{video_dir}[/cyan]...[/blue]"
@@ -1271,7 +1303,7 @@ def run_interactive_menu() -> None:
                 console,
                 langs=sub_langs,
                 auto_subs=auto_subs,
-                sub_format="srt",
+                sub_format=sub_format,
                 cookies_from_browser=session_cookies_browser,
             )
 
@@ -1422,7 +1454,7 @@ def download(
     ] = False,
     audio_codec: Annotated[
         str,
-        Option("--audio-format", help="Audio format codec to extract (e.g. m4a, mp3)"),
+            Option("--audio-format", help="Audio format codec to extract (e.g. m4a, opus, mp3)"),
     ] = "m4a",
     min_duration: Annotated[
         int | None,
@@ -1520,7 +1552,7 @@ def download(
 
     # Setup formats
     if audio_only:
-        opts["format"] = "m4a/bestaudio/best"
+        opts["format"] = make_audio_format_spec(audio_codec)
         opts["postprocessors"] = [
             {
                 "key": "FFmpegExtractAudio",
