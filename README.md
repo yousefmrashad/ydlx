@@ -1,5 +1,9 @@
 # ⚡ ydlx (yt-dlp eXtended)
 
+[![PyPI version](https://img.shields.io/pypi/v/ydlx)](https://pypi.org/project/ydlx/)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://pypi.org/project/ydlx/)
+[![License](https://img.shields.io/pypi/l/ydlx)](https://github.com/yousefmrashad/ydlx/blob/master/LICENSE)
+
 A modern, fast, interactive CLI dashboard and downloader built on top of [yt-dlp](https://github.com/yt-dlp/yt-dlp).
 
 **ydlx** eliminates complex parameter strings and brings an intuitive interactive menu, universal codec compatibility presets, automated SponsorBlock skipping, browser cookie integration, and smart platform-agnostic output organization.
