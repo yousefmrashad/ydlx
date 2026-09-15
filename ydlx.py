@@ -4,6 +4,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Annotated, Any, Callable, Generator, cast
+from urllib.parse import urlparse
 
 # Reconfigure stdout/stderr to support UTF-8 characters (like Arabic and emojis) on Windows
 if sys.platform.startswith("win"):
@@ -207,120 +208,94 @@ def format_selector(ctx: dict[str, Any]) -> Generator[dict[str, Any] | Any, None
     }
 
 
-def get_interactive_format_choices(
-    info: dict[str, Any],
+def _video_codec_label(vcodec: str) -> str:
+    """Maps a raw codec string to a human-readable video codec name."""
+    lowered = vcodec.lower()
+    if lowered.startswith("av01"):
+        return "AV1"
+    if lowered.startswith("vp9") or lowered.startswith("vp09"):
+        return "VP9"
+    if lowered.startswith("avc1") or lowered.startswith("h264"):
+        return "H.264"
+    if lowered.startswith(("h265", "hev1", "hvc1")):
+        return "H.265"
+    if lowered.startswith("vp8"):
+        return "VP8"
+    return vcodec or "unknown"
+
+
+def get_preset_format_choices(
+    info: dict[str, Any], universal: bool = False
 ) -> list[tuple[str, str, str | None]]:
     """
-    Parses formats list from video info metadata and compiles a list of
-    clean, user-friendly download options (e.g. resolutions and audio-only).
+    Builds download choices for the selected codec preset. The quality preset
+    keeps yt-dlp's best-ranked format per resolution (usually AV1/VP9) and
+    names the codec in the label; the universal preset lists only H.264 video
+    paired with AAC audio so results play on any device.
     """
     formats: list[dict[str, Any]] = info.get("formats", [])
 
     choices: list[tuple[str, str, str | None]] = []
-    resolutions: dict[str, dict[str, Any]] = {}  # resolution string -> best format dict
-    audio_formats: list[dict[str, Any]] = []
+    resolutions: dict[str, dict[str, Any]] = {}
 
     for f in formats:
         vcodec = str(f.get("vcodec", "none"))
-        acodec = str(f.get("acodec", "none"))
-
+        if universal and vcodec != "none" and not vcodec.startswith("avc1"):
+            continue
         if vcodec != "none":
             height = f.get("height")
             if height:
-                res_str = f"{height}p"
-                resolutions[res_str] = f
-        elif acodec != "none" and vcodec == "none":
-            audio_formats.append(f)
+                resolutions[f"{height}p"] = f
 
-    # Sort resolutions (highest first)
     sorted_res = sorted(
         resolutions.keys(),
         key=lambda x: int(x[:-1]) if x[:-1].isdigit() else 0,
         reverse=True,
     )
 
-    # Build choices list
-    choices.append(("🚀 Best Quality (Auto)", "bestvideo+bestaudio/best", None))
+    if universal:
+        choices.append(
+            (
+                "🚀 Best Universal Quality (Auto H.264 + AAC)",
+                "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+                "mp4",
+            )
+        )
+    else:
+        choices.append(("🚀 Best Quality (Auto)", "bestvideo+bestaudio/best", None))
 
-    # Video choices
     for res in sorted_res:
         f = resolutions[res]
         fid = str(f.get("format_id", ""))
         ext = str(f.get("ext", ""))
-        acodec = str(f.get("acodec", "none"))
-
         size_bytes = f.get("filesize") or f.get("filesize_approx")
         size_str = f" (~{size_bytes / (1024 * 1024):.1f} MB)" if size_bytes else ""
+        codec = _video_codec_label(str(f.get("vcodec", "")))
 
-        if acodec != "none":
-            choices.append((f"📺 Video: {res} ({ext}){size_str}", fid, ext))
+        if universal:
+            choices.append(
+                (
+                    f"📺 Video: {res} (H.264 + AAC){size_str}",
+                    f"{fid}+bestaudio[ext=m4a]/best[ext=mp4]/best",
+                    "mp4",
+                )
+            )
+        elif str(f.get("acodec", "none")) != "none":
+            choices.append(
+                (
+                    f"📺 Video: {res} ({codec}, {ext}){size_str}",
+                    fid,
+                    ext,
+                )
+            )
         else:
             choices.append(
                 (
-                    f"📺 Video: {res} ({ext}) + Best Audio{size_str}",
+                    f"📺 Video: {res} ({codec}, {ext}) + Best Audio{size_str}",
                     f"{fid}+bestaudio/best",
                     ext,
                 )
             )
-
-    # Audio choices (Keep top 3 audio formats)
-    for af in audio_formats[-3:]:
-        fid = str(af.get("format_id", ""))
-        ext = str(af.get("ext", ""))
-        abr = af.get("abr")
-        abr_str = f" @ {abr}kbps" if abr else ""
-        size_bytes = af.get("filesize") or af.get("filesize_approx")
-        size_str = f" (~{size_bytes / (1024 * 1024):.1f} MB)" if size_bytes else ""
-        choices.append((f"🎵 Audio Only: {ext}{abr_str}{size_str}", fid, None))
-
-    return choices
-
-
-def get_universal_mp4_choices(info: dict[str, Any]) -> list[tuple[str, str]]:
-    """
-    Finds available resolutions that support H.264 (avc1) video codec
-    and formats them as user-friendly options merged with AAC audio.
-    """
-    formats: list[dict[str, Any]] = info.get("formats", [])
-    choices: list[tuple[str, str]] = []
-    resolutions: dict[str, dict[str, Any]] = {}
-
-    # H.264 codec in YouTube starts with avc1
-    for f in formats:
-        vcodec = str(f.get("vcodec", "none"))
-
-        if vcodec != "none" and vcodec.startswith("avc1"):
-            height = f.get("height")
-            if height:
-                res_str = f"{height}p"
-                resolutions[res_str] = f
-
-    # Sort resolutions (highest first)
-    sorted_res = sorted(
-        resolutions.keys(),
-        key=lambda x: int(x[:-1]) if x[:-1].isdigit() else 0,
-        reverse=True,
-    )
-
-    choices.append(
-        (
-            "🚀 Best Universal Quality (Auto H.264 + AAC)",
-            "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        )
-    )
-
-    for res in sorted_res:
-        f = resolutions[res]
-        fid = str(f.get("format_id", ""))
-        size_bytes = f.get("filesize") or f.get("filesize_approx")
-        size_str = f" (~{size_bytes / (1024 * 1024):.1f} MB)" if size_bytes else ""
-
-        choices.append(
-            (
-                f"📺 Video: {res} (H.264) + AAC Audio{size_str}",
-                f"{fid}+bestaudio[ext=m4a]/best[ext=mp4]/best",
-            )
-        )
 
     return choices
 
@@ -421,6 +396,50 @@ def get_saved_cookie_source() -> str | None:
 def resolve_cookie_source(cookies_from_browser: str | None) -> str | None:
     """Prefers an explicitly passed browser, otherwise falls back to the saved one."""
     return cookies_from_browser or get_saved_cookie_source()
+
+
+# =====================================================================
+# URL Helpers
+# =====================================================================
+
+
+def normalize_url(url: str) -> str | None:
+    """Returns a normalized http(s) URL, or None when the input is empty or invalid."""
+    url = url.strip()
+    if not url:
+        return None
+    if "://" not in url:
+        first_segment = url.split("/")[0]
+        if not first_segment or "." not in first_segment:
+            return None
+        url = f"https://{url}"
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None
+    return url
+
+
+def parse_cli_url(url: str) -> str:
+    """Validates a CLI URL argument, exiting with an error when it is invalid."""
+    normalized = normalize_url(url)
+    if normalized is None:
+        Console().print(
+            "[bold red]❌ Invalid URL. Provide a full link, e.g. https://youtu.be/VIDEO_ID[/bold red]"
+        )
+        raise typer.Exit(code=1)
+    return normalized
+
+
+def prompt_for_url(console: Console) -> str:
+    """Prompts until the user enters a usable video URL."""
+    while True:
+        url = Prompt.ask("Enter video URL").strip()
+        normalized = normalize_url(url)
+        if normalized:
+            return normalized
+        console.print(
+            "[bold red]❌ Empty or invalid URL. Use a full link, e.g. https://youtu.be/VIDEO_ID[/bold red]"
+        )
 
 
 # =====================================================================
@@ -856,7 +875,12 @@ def print_video_info(info: dict[str, Any], console: Console) -> None:
 
             vcodec = str(f.get("vcodec", "none"))
             acodec = str(f.get("acodec", "none"))
-            codec = f"V:{vcodec.split('.')[0]} A:{acodec.split('.')[0]}"
+            if vcodec != "none" and acodec != "none":
+                codec = f"V:{vcodec.split('.')[0]} + A:{acodec.split('.')[0]}"
+            elif vcodec != "none":
+                codec = f"V:{vcodec.split('.')[0]}"
+            else:
+                codec = f"A:{acodec.split('.')[0]}"
 
             size_bytes = f.get("filesize") or f.get("filesize_approx")
             if isinstance(size_bytes, (int, float)):
@@ -868,6 +892,38 @@ def print_video_info(info: dict[str, Any], console: Console) -> None:
             table.add_row(fid, ext, res, codec, size)
 
         console.print(table)
+
+        audio_only = [
+            f
+            for f in formats
+            if str(f.get("vcodec", "none")) == "none"
+            and str(f.get("acodec", "none")) != "none"
+        ]
+        if audio_only:
+            audio_table = Table(title="Audio Formats", box=box.ROUNDED)
+            audio_table.add_column("Format ID", style="cyan")
+            audio_table.add_column("Ext", style="green")
+            audio_table.add_column("Codec", style="magenta")
+            audio_table.add_column("Bitrate", style="yellow")
+            audio_table.add_column("Size", style="blue")
+
+            for f in audio_only[-5:]:
+                fid = str(f.get("format_id", "N/A"))
+                ext = str(f.get("ext", "N/A"))
+                acodec = str(f.get("acodec", "none")).split(".")[0]
+                abr = f.get("abr") or f.get("tbr")
+                bitrate = (
+                    f"{abr:.0f} kbps" if isinstance(abr, (int, float)) else "Unknown"
+                )
+                size_bytes = f.get("filesize") or f.get("filesize_approx")
+                size = (
+                    f"{size_bytes / (1024 * 1024):.1f} MB"
+                    if isinstance(size_bytes, (int, float))
+                    else "Unknown"
+                )
+                audio_table.add_row(fid, ext, acodec, bitrate, size)
+
+            console.print(audio_table)
 
 
 def do_download_interactive(
@@ -893,23 +949,19 @@ def do_download_interactive(
         "[cyan]Default Video + Audio combined (Auto)[/cyan]",
     )
     menu_table.add_row(
-        "[bold green]2.[/bold green] 📱 Universal MP4",
-        "[green]Force standard H.264/AAC codecs (Plays anywhere)[/green]",
+        "[bold green]2.[/bold green] 🎨 Choose Resolution & Preset",
+        "[green]Pick quality (AV1/VP9) or compatibility (H.264/AAC) per resolution[/green]",
     )
     menu_table.add_row(
-        "[bold magenta]3.[/bold magenta] 🎨 Interactive Format Selector",
-        "[magenta]Choose video resolution or audio track[/magenta]",
-    )
-    menu_table.add_row(
-        "[bold bright_yellow]4.[/bold bright_yellow] 🎯 Choose Specific Format ID",
+        "[bold bright_yellow]3.[/bold bright_yellow] 🎯 Choose Specific Format ID",
         "[bright_yellow]Manually input a format code[/bright_yellow]",
     )
     menu_table.add_row(
-        "[bold orange3]5.[/bold orange3] ⏱️  Filter by Duration",
+        "[bold orange3]4.[/bold orange3] ⏱️  Filter by Duration",
         "[orange3]Filter downloads based on duration limits[/orange3]",
     )
     menu_table.add_row(
-        "[bold red]6.[/bold red] ↩ Back", "[red]Return to main menu[/red]"
+        "[bold red]5.[/bold red] ↩ Back", "[red]Return to main menu[/red]"
     )
 
     console.print("\n")
@@ -923,7 +975,7 @@ def do_download_interactive(
     )
 
     choice = Prompt.ask(
-        "Select download type", choices=["1", "2", "3", "4", "5", "6"], default="1"
+        "Select download type", choices=["1", "2", "3", "4", "5"], default="1"
     )
 
     opts: dict[str, Any] = {}
@@ -932,42 +984,34 @@ def do_download_interactive(
     if choice == "1":
         pass
     elif choice == "2":
+        console.print("\n[bold]Codec presets:[/bold]")
+        console.print(
+            "  [cyan]1[/cyan]. 🚀 Best Quality — AV1/VP9, smaller files (modern players only)"
+        )
+        console.print(
+            "  [cyan]2[/cyan]. 📱 Universal — H.264 + AAC (plays on any device)"
+        )
+        universal = Prompt.ask("Select preset", choices=["1", "2"], default="1") == "2"
         if info.get("_type") == "playlist":
             console.print(
-                "[yellow]⚠️ Playlist downloads will use the best compatible universal quality automatically.[/yellow]"
+                "[yellow]⚠️ Per-resolution selection only works for single videos; "
+                "the playlist uses the preset's auto mode.[/yellow]"
             )
-            opts["format"] = (
-                "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]/best"
-            )
-            opts["merge_output_format"] = "mp4"
-        else:
-            choices = get_universal_mp4_choices(info)
-            console.print("\n[bold]Available Universal H.264 + AAC resolutions:[/bold]")
-            for idx, (display, _) in enumerate(choices, 1):
-                console.print(f"  [cyan]{idx}[/cyan]. {display}")
-            console.print(f"  [cyan]{len(choices) + 1}[/cyan]. [red]↩ Cancel[/red]")
-
-            while True:
-                choice_idx = IntPrompt.ask("Select resolution number", default=1)
-                if 1 <= choice_idx <= len(choices) + 1:
-                    break
-                console.print(
-                    f"[bold red]❌ Invalid selection. Please enter a number between 1 and {len(choices) + 1}.[/bold red]"
+            if universal:
+                opts["format"] = (
+                    "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]/best"
                 )
-
-            if choice_idx == len(choices) + 1:
-                return
-            selected_choice = choices[choice_idx - 1]
-            opts["format"] = selected_choice[1]
-            opts["merge_output_format"] = "mp4"
-    elif choice == "3":
-        if info.get("_type") == "playlist":
-            console.print(
-                "[yellow]⚠️ Interactive format selection is only supported for single videos. Downloading best quality instead.[/yellow]"
-            )
+                opts["merge_output_format"] = "mp4"
+            else:
+                opts["format"] = "bestvideo+bestaudio/best"
         else:
-            choices_list = get_interactive_format_choices(info)
-            console.print("\n[bold]Available formats for this video:[/bold]")
+            choices_list = get_preset_format_choices(info, universal=universal)
+            preset_label = (
+                "Universal H.264 + AAC" if universal else "Best Quality (AV1/VP9)"
+            )
+            console.print(
+                f"\n[bold]Available {preset_label} formats for this video:[/bold]"
+            )
             for idx, (display, _, _) in enumerate(choices_list, 1):
                 console.print(f"  [cyan]{idx}[/cyan]. {display}")
             console.print(
@@ -986,15 +1030,13 @@ def do_download_interactive(
                 return
             selected_format = choices_list[choice_idx - 1]
             opts["format"] = selected_format[1]
-            if selected_format[0].startswith("🎵 Audio"):
-                target_dir = get_default_music_dir()
             if selected_format[2]:
                 opts["merge_output_format"] = selected_format[2]
                 opts["remux_video"] = selected_format[2]
-    elif choice == "4":
+    elif choice == "3":
         format_code = Prompt.ask("Enter Format ID (e.g. '137+140', '22', or 'worst')")
         opts["format"] = format_code
-    elif choice == "5":
+    elif choice == "4":
         min_sec = IntPrompt.ask(
             "Enter minimum duration in seconds (0 for no limit)", default=60
         )
@@ -1004,7 +1046,7 @@ def do_download_interactive(
         min_sec_val = min_sec if min_sec > 0 else None
         max_sec_val = max_sec if max_sec > 0 else None
         opts["match_filter"] = make_duration_filter(min_sec_val, max_sec_val)
-    elif choice == "6":
+    elif choice == "5":
         return
 
     # Ask about SponsorBlock skipping
@@ -1112,7 +1154,7 @@ def run_interactive_menu() -> None:
         )
 
         if choice == "1":
-            url = Prompt.ask("Enter video URL")
+            url = prompt_for_url(console)
             with console.status("[bold blue]Fetching metadata...[/bold blue]"):
                 try:
                     info = get_video_info(
@@ -1188,11 +1230,11 @@ def run_interactive_menu() -> None:
                 )
 
         elif choice == "2":
-            url = Prompt.ask("Enter video URL")
+            url = prompt_for_url(console)
             do_download_interactive(url, None, console)
 
         elif choice == "3":
-            url = Prompt.ask("Enter video URL")
+            url = prompt_for_url(console)
             codec = Prompt.ask(
                 "Select audio format",
                 choices=["m4a", "mp3", "wav", "flac"],
@@ -1210,7 +1252,7 @@ def run_interactive_menu() -> None:
             )
 
         elif choice == "4":
-            url = Prompt.ask("Enter video URL")
+            url = prompt_for_url(console)
             sub_langs = Prompt.ask(
                 "Subtitle languages (comma-separated, e.g. 'en', 'ar', 'all')",
                 default="en",
@@ -1322,6 +1364,7 @@ def info(
     Extract and display information about a video or playlist.
     """
     console = Console()
+    url = parse_cli_url(url)
     with console.status("[bold blue]Fetching video metadata...[/bold blue]"):
         try:
             video_info = get_video_info(
@@ -1461,6 +1504,9 @@ def download(
             "[bold red]Error: You must provide either a URL or a --info-json file.[/bold red]"
         )
         raise typer.Exit(code=1)
+
+    if url:
+        url = parse_cli_url(url)
 
     target_dir: Path
     if output_dir:
@@ -1604,6 +1650,7 @@ def audio(
     Extract and download audio from a video.
     """
     console = Console()
+    url = parse_cli_url(url)
     target_dir = Path(output_dir) if output_dir else get_default_music_dir()
     console.print(
         f"[blue]Extracting audio ({codec}) to [cyan]{target_dir}[/cyan] from: [cyan]{url}[/cyan][/blue]"
@@ -1683,6 +1730,7 @@ def subs(
     Download subtitles only without downloading the video or audio media.
     """
     console = Console()
+    url = parse_cli_url(url)
     target_dir = Path(output_dir) if output_dir else get_default_video_dir()
     console.print(
         f"[blue]Downloading subtitles ({langs}, {format}) to [cyan]{target_dir}[/cyan] from: [cyan]{url}[/cyan][/blue]"
