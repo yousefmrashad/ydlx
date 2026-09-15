@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Annotated, Any, Callable, Generator, cast
@@ -13,6 +14,7 @@ if sys.platform.startswith("win"):
 
 import typer
 import yt_dlp
+from yt_dlp.utils import DownloadError
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
@@ -42,19 +44,31 @@ session_cookies_browser: str | None = None
 # Custom Logger and Progress Tracker
 # =====================================================================
 
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from yt-dlp messages."""
+    return ANSI_ESCAPE_RE.sub("", text)
+
 
 class MyLogger:
     """Custom logger to pipe yt-dlp output to Rich formatting."""
 
     console: Console
     verbose: bool
+    already_downloaded: list[str]
 
     def __init__(self, verbose: bool = False):
         self.console = Console()
         self.verbose = verbose
+        self.already_downloaded = []
 
     def debug(self, msg: str) -> None:
         # yt-dlp outputs debug and info messages through debug()
+        clean = strip_ansi(msg)
+        if "has already been downloaded" in clean:
+            self.already_downloaded.append(clean.replace("[download] ", ""))
         if msg.startswith("[debug] "):
             if self.verbose:
                 self.console.print(f"[grey50]{msg}[/grey50]")
@@ -66,10 +80,10 @@ class MyLogger:
             self.console.print(f"[cyan]{msg}[/cyan]")
 
     def warning(self, msg: str) -> None:
-        self.console.print(f"[yellow]⚠️  Warning: {msg}[/yellow]")
+        self.console.print(f"[yellow]⚠️  Warning: {strip_ansi(msg)}[/yellow]")
 
     def error(self, msg: str) -> None:
-        self.console.print(f"[bold red]❌ Error: {msg}[/bold red]")
+        self.console.print(f"[bold red]❌ Error: {strip_ansi(msg)}[/bold red]")
 
 
 class DownloadTracker:
@@ -372,6 +386,8 @@ def get_video_info(
     ydl_opts: dict[str, Any] = {
         "logger": MyLogger(verbose=verbose),
         "quiet": not verbose,
+        "color": "never",
+        "remote_components": ["ejs:github"],
     }
     if cookies_from_browser:
         ydl_opts["cookiesfrombrowser"] = (cookies_from_browser,)
@@ -398,6 +414,13 @@ def download_video(
         "progress_hooks": [tracker.hook],
         "quiet": True,
         "paths": {"home": str(target_dir)},
+        # yt-dlp colors ERROR:/WARNING: prefixes whenever stderr is a TTY,
+        # even when a custom logger is set; our logger does its own styling.
+        "color": "never",
+        # Fetch yt-dlp's official challenge solver scripts so YouTube's JS
+        # challenges get solved when a JS runtime (e.g. Deno) is available,
+        # instead of silently accepting throttled/missing formats.
+        "remote_components": ["ejs:github"],
     }
 
     if cookies_from_browser:
@@ -408,10 +431,39 @@ def download_video(
 
     try:
         with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
-            return int(ydl.download([url]))
-    except Exception as e:
-        Console().print(f"[bold red]❌ Download error: {e}[/bold red]")
+            code = int(ydl.download([url]))
+    except DownloadError as e:
+        msg = strip_ansi(str(e))
+        if "Unable to download video subtitles" in msg and (
+            ydl_opts.get("writesubtitles") or ydl_opts.get("writeautomaticsub")
+        ):
+            console = Console()
+            console.print(f"[yellow]⚠️  Warning: {msg}[/yellow]")
+            console.print("[yellow]⚠️  Retrying without subtitles...[/yellow]")
+            retry_opts = {
+                key: value
+                for key, value in ydl_opts.items()
+                if key not in ("writesubtitles", "writeautomaticsub")
+            }
+            retry_opts["progress_hooks"] = [DownloadTracker().hook]
+            with yt_dlp.YoutubeDL(cast(Any, retry_opts)) as ydl:
+                return int(ydl.download([url]))
+        Console().print(f"[bold red]❌ Download error: {msg}[/bold red]")
         return 1
+    except Exception as e:
+        Console().print(f"[bold red]❌ Download error: {strip_ansi(str(e))}[/bold red]")
+        return 1
+
+    if ydl_opts["logger"].already_downloaded:
+        console = Console()
+        for line in ydl_opts["logger"].already_downloaded:
+            console.print(f"[yellow]⚠️  {line}[/yellow]")
+        console.print(
+            "[yellow]⚠️  yt-dlp skips files matched by name, even if the requested "
+            "format differs. Delete the file(s) or pick another output directory "
+            "to force a redownload.[/yellow]"
+        )
+    return code
 
 
 def download_audio(
@@ -466,6 +518,7 @@ def download_from_info_json(
         "progress_hooks": [tracker.hook],
         "quiet": True,
         "paths": {"home": str(target_dir)},
+        "color": "never",
     }
 
     if cookies_from_browser:
@@ -476,10 +529,26 @@ def download_from_info_json(
 
     try:
         with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
-            return int(ydl.download_with_info_file(info_file))
-    except Exception as e:
-        Console().print(f"[bold red]❌ Download error: {e}[/bold red]")
+            code = int(ydl.download_with_info_file(info_file))
+    except DownloadError as e:
+        Console().print(
+            f"[bold red]❌ Download error: {strip_ansi(str(e))}[/bold red]"
+        )
         return 1
+    except Exception as e:
+        Console().print(f"[bold red]❌ Download error: {strip_ansi(str(e))}[/bold red]")
+        return 1
+
+    if ydl_opts["logger"].already_downloaded:
+        console = Console()
+        for line in ydl_opts["logger"].already_downloaded:
+            console.print(f"[yellow]⚠️  {line}[/yellow]")
+        console.print(
+            "[yellow]⚠️  yt-dlp skips files matched by name, even if the requested "
+            "format differs. Delete the file(s) or pick another output directory "
+            "to force a redownload.[/yellow]"
+        )
+    return code
 
 
 def configure_subtitles(
@@ -501,17 +570,23 @@ def configure_subtitles(
 
     langs = [lang.strip() for lang in sub_langs.split(",") if lang.strip()]
     opts["subtitleslangs"] = langs if langs else ["en"]
-    opts["subtitlesformat"] = sub_format or "srt"
+
+    # "srt" is (almost) never a native source format; pick the best native
+    # track and let the convertor below produce the .srt file.
+    opts["subtitlesformat"] = "best" if sub_format.lower() == "srt" else sub_format
 
     if "postprocessors" not in opts:
         opts["postprocessors"] = []
 
-    # Convert subtitles to srt if requested
+    # Convert subtitles to srt if requested. The CLI registers this converter
+    # as "before_dl": that phase runs right after subtitle files are written,
+    # including under skip_download, where later PP phases never run.
     if sub_format.lower() in ("srt", "vtt"):
         opts["postprocessors"].append(
             {
                 "key": "FFmpegSubtitlesConvertor",
                 "format": sub_format.lower(),
+                "when": "before_dl",
             }
         )
 
@@ -540,22 +615,31 @@ def download_subtitles_only(
     opts: dict[str, Any] = {
         "skip_download": True,
         "writesubtitles": True,
-        "subtitlesformat": sub_format,
     }
     if auto_subs:
         opts["writeautomaticsub"] = True
 
     langs = [lang.strip() for lang in sub_langs.split(",") if lang.strip()]
     opts["subtitleslangs"] = langs if langs else ["en"]
+    # "srt" is (almost) never a native source format; pick the best native
+    # track and let the convertor below produce the .srt file.
+    opts["subtitlesformat"] = "best" if sub_format.lower() == "srt" else sub_format
+    # A single failed language track (e.g. HTTP 429 rate limit) must not abort
+    # the whole run; yt-dlp then reports it as a warning and keeps going.
+    opts["ignoreerrors"] = True
 
     # Only convert when the target format is a convertible subtitle container;
     # anything else (e.g. "best") saves files in their native extracted format.
+    # "before_dl" mirrors the yt-dlp CLI: that phase runs right after subtitle
+    # files are written, including under skip_download, where later PP phases
+    # never run.
     opts["postprocessors"] = []
     if sub_format.lower() in ("srt", "vtt"):
         opts["postprocessors"].append(
             {
                 "key": "FFmpegSubtitlesConvertor",
                 "format": sub_format.lower(),
+                "when": "before_dl",
             }
         )
 
@@ -566,6 +650,46 @@ def download_subtitles_only(
         output_dir=target_dir,
         verbose=verbose,
     )
+
+
+def report_subtitle_download(
+    url: str,
+    target_dir: Path,
+    console: Console,
+    *,
+    langs: str,
+    auto_subs: bool,
+    sub_format: str,
+    cookies_from_browser: str | None,
+    verbose: bool = False,
+) -> int:
+    """Download subtitles and report how many files landed; returns an exit code."""
+    existing = {p for p in target_dir.iterdir() if p.is_file()}
+    error_code = download_subtitles_only(
+        url,
+        sub_langs=langs,
+        auto_subs=auto_subs,
+        sub_format=sub_format,
+        cookies_from_browser=cookies_from_browser,
+        output_dir=target_dir,
+        verbose=verbose,
+    )
+    if error_code:
+        console.print("[bold red]❌ Subtitles download failed![/bold red]")
+        return error_code
+    new_files = {p for p in target_dir.iterdir() if p.is_file()} - existing
+    if not new_files:
+        console.print(
+            f"[bold red]❌ No subtitles found for '{langs}' on this video.[/bold red]"
+        )
+        console.print(
+            "[dim]Tip: try common languages like 'en', or allow auto-generated captions.[/dim]"
+        )
+        return 1
+    console.print(
+        f"[bold green]✓ Downloaded {len(new_files)} subtitle file(s) to [cyan]{target_dir}[/cyan][/bold green]"
+    )
+    return 0
 
 
 # =====================================================================
@@ -982,12 +1106,14 @@ def run_interactive_menu() -> None:
                 console.print(
                     f"[blue]Downloading subtitles ({sub_langs}) to [cyan]{video_dir}[/cyan]...[/blue]"
                 )
-                _ = download_subtitles_only(
+                _ = report_subtitle_download(
                     url,
-                    sub_langs=sub_langs,
+                    video_dir,
+                    console,
+                    langs=sub_langs,
                     auto_subs=auto_subs,
+                    sub_format="srt",
                     cookies_from_browser=session_cookies_browser,
-                    output_dir=video_dir,
                 )
 
         elif choice == "2":
@@ -1026,12 +1152,14 @@ def run_interactive_menu() -> None:
             console.print(
                 f"[blue]Downloading subtitles ({sub_langs}) to [cyan]{video_dir}[/cyan]...[/blue]"
             )
-            _ = download_subtitles_only(
+            _ = report_subtitle_download(
                 url,
-                sub_langs=sub_langs,
+                video_dir,
+                console,
+                langs=sub_langs,
                 auto_subs=auto_subs,
+                sub_format="srt",
                 cookies_from_browser=session_cookies_browser,
-                output_dir=video_dir,
             )
 
         elif choice == "5":
@@ -1486,20 +1614,18 @@ def subs(
     console.print(
         f"[blue]Downloading subtitles ({langs}, {format}) to [cyan]{target_dir}[/cyan] from: [cyan]{url}[/cyan][/blue]"
     )
-    error_code = download_subtitles_only(
+    error_code = report_subtitle_download(
         url,
-        sub_langs=langs,
+        target_dir,
+        console,
+        langs=langs,
         auto_subs=auto,
         sub_format=format,
         cookies_from_browser=cookies_from_browser,
-        output_dir=target_dir,
         verbose=verbose,
     )
     if error_code:
-        console.print("[bold red]❌ Subtitles download failed![/bold red]")
         raise typer.Exit(code=error_code)
-    else:
-        console.print("[bold green]✓ Subtitles downloaded successfully![/bold green]")
 
 
 if __name__ == "__main__":

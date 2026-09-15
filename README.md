@@ -26,6 +26,8 @@ A modern, fast, interactive CLI dashboard and downloader built on top of [yt-dlp
 ### Prerequisites
 Make sure **[FFmpeg](https://ffmpeg.org/)** is installed and accessible on your system `PATH`.
 
+**[Deno](https://deno.com/)** is optional but recommended: it lets yt-dlp solve YouTube's JavaScript challenges, so downloads run at full speed and all formats stay available.
+
 ### Install from PyPI (recommended)
 
 ```bash
