@@ -1128,9 +1128,10 @@ def run_interactive_menu() -> None:
             console.print("1. [green]💾 Save metadata to info.json[/green]")
             console.print("2. [green]📥 Download this video[/green]")
             console.print("3. [yellow]💬 Download subtitles only[/yellow]")
-            console.print("4. [red]↩ Back to main menu[/red]")
+            console.print("4. [magenta]🎵 Download audio (M4A/MP3)[/magenta]")
+            console.print("5. [red]↩ Back to main menu[/red]")
             sub_choice = Prompt.ask(
-                "Select action", choices=["1", "2", "3", "4"], default="1"
+                "Select action", choices=["1", "2", "3", "4", "5"], default="1"
             )
 
             if sub_choice == "1":
@@ -1168,6 +1169,22 @@ def run_interactive_menu() -> None:
                     auto_subs=auto_subs,
                     sub_format="srt",
                     cookies_from_browser=session_cookies_browser,
+                )
+            elif sub_choice == "4":
+                codec = Prompt.ask(
+                    "Select audio format",
+                    choices=["m4a", "mp3", "wav", "flac"],
+                    default="m4a",
+                )
+                music_dir = get_default_music_dir()
+                console.print(
+                    f"[blue]Starting audio download ({codec}) to [cyan]{music_dir}[/cyan]...[/blue]"
+                )
+                _ = download_audio(
+                    url,
+                    codec,
+                    cookies_from_browser=session_cookies_browser,
+                    output_dir=music_dir,
                 )
 
         elif choice == "2":
