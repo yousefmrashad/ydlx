@@ -1167,7 +1167,7 @@ def run_interactive_menu() -> None:
             print_video_info(info, console)
 
             console.print("\n[bold]Submenu Actions:[/bold]")
-            console.print("1. [green]💾 Save metadata to info.json[/green]")
+            console.print("1. [cyan]💾 Save metadata to info.json[/cyan]")
             console.print("2. [green]📥 Download this video[/green]")
             console.print("3. [yellow]💬 Download subtitles only[/yellow]")
             console.print("4. [magenta]🎵 Download audio (M4A/MP3)[/magenta]")
