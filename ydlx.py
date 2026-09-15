@@ -375,6 +375,55 @@ def get_default_video_dir() -> Path:
 
 
 # =====================================================================
+# Persistent Settings
+# =====================================================================
+
+
+def get_config_dir() -> Path:
+    """Returns the platform-agnostic config directory (%APPDATA%/ydlx or ~/.config/ydlx)."""
+    if sys.platform.startswith("win"):
+        base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    config_dir = Path(base) / "ydlx"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    return config_dir
+
+
+def load_settings() -> dict[str, Any]:
+    """Loads persisted settings, tolerating a missing or corrupt config file."""
+    try:
+        with open(get_config_dir() / "settings.json", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_settings(settings: dict[str, Any]) -> None:
+    """Merges settings into the config file; None values remove their key."""
+    current = load_settings()
+    for key, value in settings.items():
+        if value is None:
+            current.pop(key, None)
+        else:
+            current[key] = value
+    with open(get_config_dir() / "settings.json", "w", encoding="utf-8") as f:
+        json.dump(current, f, indent=2)
+
+
+def get_saved_cookie_source() -> str | None:
+    """Returns the persisted cookie-source browser, if any."""
+    value = load_settings().get("cookies_from_browser")
+    return str(value) if value else None
+
+
+def resolve_cookie_source(cookies_from_browser: str | None) -> str | None:
+    """Prefers an explicitly passed browser, otherwise falls back to the saved one."""
+    return cookies_from_browser or get_saved_cookie_source()
+
+
+# =====================================================================
 # API / Core Functions
 # =====================================================================
 
@@ -383,6 +432,7 @@ def get_video_info(
     url: str, cookies_from_browser: str | None = None, verbose: bool = False
 ) -> dict[str, Any]:
     """Extract video metadata without downloading it."""
+    cookies_from_browser = resolve_cookie_source(cookies_from_browser)
     ydl_opts: dict[str, Any] = {
         "logger": MyLogger(verbose=verbose),
         "quiet": not verbose,
@@ -405,6 +455,7 @@ def download_video(
     verbose: bool = False,
 ) -> int:
     """Download a video with optional custom configurations."""
+    cookies_from_browser = resolve_cookie_source(cookies_from_browser)
     target_dir = Path(output_dir) if output_dir else get_default_video_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -509,6 +560,7 @@ def download_from_info_json(
     verbose: bool = False,
 ) -> int:
     """Download video using an existing info.json file."""
+    cookies_from_browser = resolve_cookie_source(cookies_from_browser)
     target_dir = Path(output_dir) if output_dir else get_default_video_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1004,6 +1056,8 @@ def do_download_interactive(
 def run_interactive_menu() -> None:
     """Runs the main CLI prompt-driven dashboard loop."""
     global session_cookies_browser
+    if session_cookies_browser is None:
+        session_cookies_browser = get_saved_cookie_source()
     console = Console()
     while True:
         cookies_status = (
@@ -1192,8 +1246,10 @@ def run_interactive_menu() -> None:
                 default="none",
             )
             session_cookies_browser = None if browser == "none" else browser
+            save_settings({"cookies_from_browser": session_cookies_browser})
+            source_label = session_cookies_browser or "None"
             console.print(
-                f"[bold green]✓ Session browser cookies set to: {session_cookies_browser}[/bold green]"
+                f"[bold green]✓ Browser cookies source set to: {source_label} (persisted)[/bold green]"
             )
 
         elif choice == "7":
