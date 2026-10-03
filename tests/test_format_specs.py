@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import pytest
 import yt_dlp
+
 from ydlx import VideoPreset, make_audio_format_spec, make_video_format_spec
 
 # Mirrors a typical YouTube format list: pre-merged legacy stream, H.264 and

@@ -2,6 +2,7 @@
 
 import pytest
 import typer
+
 import ydlx
 from ydlx import _video_codec_label, normalize_url, parse_cli_url
 

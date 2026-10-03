@@ -2,21 +2,21 @@ import json
 import os
 import re
 import sys
-from enum import Enum
+from collections.abc import Callable
+from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Any, Callable, cast
+from typing import Annotated, Any, cast
 from urllib.parse import urlparse
 
 # Reconfigure stdout/stderr to support UTF-8 characters (like Arabic and emojis) on Windows
 if sys.platform.startswith("win"):
     if hasattr(sys.stdout, "reconfigure"):
-        getattr(sys.stdout, "reconfigure")(encoding="utf-8")
+        cast(Any, sys.stdout).reconfigure(encoding="utf-8")
     if hasattr(sys.stderr, "reconfigure"):
-        getattr(sys.stderr, "reconfigure")(encoding="utf-8")
+        cast(Any, sys.stderr).reconfigure(encoding="utf-8")
 
 import typer
 import yt_dlp
-from yt_dlp.utils import DownloadError
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
@@ -32,6 +32,7 @@ from rich.progress import (
 from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 from typer import Argument, Option, Typer
+from yt_dlp.utils import DownloadError
 
 app = Typer(
     name="ydlx",
@@ -273,7 +274,7 @@ def make_audio_format_spec(format_codec: str) -> str:
     return "bestaudio/best"
 
 
-class VideoPreset(str, Enum):
+class VideoPreset(StrEnum):
     """Codec presets for video downloads, mirroring the interactive wizard."""
 
     UNIVERSAL = "universal"
@@ -1377,7 +1378,7 @@ def info(
             )
         except Exception as e:
             console.print(f"[bold red]Error: Failed to extract info: {e}[/bold red]")
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from e
 
     print_video_info(video_info, console)
 

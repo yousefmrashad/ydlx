@@ -35,3 +35,17 @@ package = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+# Enable Pyflakes (F), pycodestyle (E, W), isort (I), pyupgrade (UP), and flake8-bugbear (B)
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "E501", # Let the formatter handle long lines automatically
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
