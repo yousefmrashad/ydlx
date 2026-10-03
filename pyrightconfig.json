@@ -1,0 +1,8 @@
+{
+  "typeCheckingMode": "standard",
+  "pythonVersion": "3.11",
+  "venvPath": ".",
+  "venv": ".venv",
+  "include": ["ydlx.py", "tests"],
+  "exclude": ["build", "dist", ".venv", "ydlx.egg-info"]
+}

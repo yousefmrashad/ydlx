@@ -1,6 +1,6 @@
 [project]
 name = "ydlx"
-version = "0.2.0"
+version = "0.3.0"
 description = "An interactive, feature-rich CLI dashboard and downloader for yt-dlp"
 readme = "README.md"
 license = "GPL-3.0-or-later"
@@ -27,15 +27,11 @@ ydlx = "ydlx:app"
 requires = ["setuptools>=77.0.0"]
 build-backend = "setuptools.build_meta"
 
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.15", "basedpyright>=1.31"]
+
 [tool.uv]
 package = true
 
-[tool.basedpyright]
-typeCheckingMode = "standard"
-venvPath = "."
-venv = ".venv"
-pythonVersion = "3.11"
-exclude = [
-    "build",
-    ".venv",
-]
+[tool.pytest.ini_options]
+testpaths = ["tests"]

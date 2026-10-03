@@ -83,17 +83,24 @@ This opens the interactive dashboard where you can inspect metadata, choose reso
 
 ### 2. Download Video / Playlist
 ```bash
-# Download best quality to ~/Downloads/video
+# Download Universal MP4 (H.264 + AAC) to ~/Downloads/video
 ydlx download "https://www.youtube.com/watch?v=..."
+
+# Cap the resolution (picks the best available at or below it)
+ydlx download "https://www.youtube.com/watch?v=..." --res 1080
+
+# Highest quality instead (AV1/VP9, native container)
+ydlx download "https://www.youtube.com/watch?v=..." --preset best --res 720
+
+# Escape hatch: raw yt-dlp format code or selector (cannot be combined with --preset/--res)
+ydlx download "https://www.youtube.com/watch?v=..." -f "137+140"
+ydlx download "https://www.youtube.com/watch?v=..." -f "bestvideo[height<=720]+bestaudio"
 
 # Download and embed subtitles directly into the video
 ydlx download "https://www.youtube.com/watch?v=..." --embed-subs --sub-langs en,ar
 
 # Download subtitles as separate .srt file alongside the video
 ydlx download "https://www.youtube.com/watch?v=..." --subs --auto-subs
-
-# Force Universal MP4 (H.264 + AAC)
-ydlx download "https://www.youtube.com/watch?v=..." --custom-selector
 
 # Skip sponsor segments
 ydlx download "https://www.youtube.com/watch?v=..." -s
@@ -102,13 +109,21 @@ ydlx download "https://www.youtube.com/watch?v=..." -s
 ydlx download "https://www.youtube.com/watch?v=..." -o "./custom_folder"
 ```
 
+| Preset | Result |
+|---|---|
+| `universal` *(default)* | H.264 video + AAC audio, merged into MP4 — plays on any device |
+| `best` | yt-dlp's highest ranked quality (usually AV1/VP9), native container |
+
 ### 3. Download Subtitles Only
 ```bash
 # Download English subtitles (.srt) to ~/Downloads/video without downloading the video
 ydlx subs "https://www.youtube.com/watch?v=..."
 
 # Download specific languages with auto-caption fallback
-ydlx subs "https://www.youtube.com/watch?v=..." --langs en,es,ar
+ydlx subs "https://www.youtube.com/watch?v=..." --sub-langs en,es,ar
+
+# Choose the subtitle format
+ydlx subs "https://www.youtube.com/watch?v=..." --sub-format vtt
 ```
 
 ### 4. Extract Audio
@@ -125,9 +140,41 @@ ydlx audio "https://www.youtube.com/watch?v=..." --codec mp3
 # View metadata, formats, and available subtitle languages
 ydlx info "https://www.youtube.com/watch?v=..."
 
-# Save metadata to .info.json
+# Save metadata to .info.json in the current directory
 ydlx info "https://www.youtube.com/watch?v=..." --save
+
+# Save metadata into a specific directory
+ydlx info "https://www.youtube.com/watch?v=..." -o "./metadata"
 ```
+
+### Shared Flags
+| Flag | Meaning |
+|---|---|
+| `-o` | Output directory |
+| `-b` | Extract cookies from browser (chrome, firefox, edge, brave, safari, opera) |
+| `-l` | Comma-separated subtitle languages |
+| `-S` | Download subtitles as a separate file |
+| `--auto-subs` / `--no-auto-subs` | Include auto-generated captions |
+| `-s` | Skip sponsor segments via SponsorBlock |
+| `-v` | Verbose output |
+
+---
+
+## 🧪 Development
+```bash
+# Install with dev dependencies
+uv sync --group dev
+
+# Run the test suite (no network required)
+uv run pytest
+
+# Lint, format, and type check
+uv run ruff check .
+uv run ruff format --check .
+uv run basedpyright
+```
+
+CI runs lint, format check, tests, and type checks on Linux and Windows.
 
 ---
 

@@ -2,8 +2,9 @@ import json
 import os
 import re
 import sys
+from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, Callable, Generator, cast
+from typing import Annotated, Any, Callable, cast
 from urllib.parse import urlparse
 
 # Reconfigure stdout/stderr to support UTF-8 characters (like Arabic and emojis) on Windows
@@ -154,60 +155,6 @@ class DownloadTracker:
 # =====================================================================
 
 
-def format_selector(ctx: dict[str, Any]) -> Generator[dict[str, Any] | Any, None, None]:
-    """
-    Select the best video and the best audio that won't result in an mkv.
-    (Custom format selector example)
-    """
-    formats_list = ctx.get("formats")
-    if not formats_list:
-        return
-    formats: list[dict[str, Any]] = formats_list[::-1]
-
-    # Find best video
-    try:
-        best_video = next(
-            f
-            for f in formats
-            if f.get("vcodec") != "none" and f.get("acodec") == "none"
-        )
-    except StopIteration:
-        # Fallback to any best video
-        best_video = next((f for f in formats if f.get("vcodec") != "none"), None)
-
-    if not best_video:
-        return
-
-    # Find compatible audio extension (mp4 -> m4a, webm -> webm)
-    video_ext = str(best_video.get("ext") or "mp4")
-    audio_ext = {"mp4": "m4a", "webm": "webm"}.get(video_ext, "m4a")
-
-    try:
-        best_audio = next(
-            f
-            for f in formats
-            if (
-                f.get("acodec") != "none"
-                and f.get("vcodec") == "none"
-                and f.get("ext") == audio_ext
-            )
-        )
-    except StopIteration:
-        # Fallback to any audio
-        best_audio = next((f for f in formats if f.get("acodec") != "none"), None)
-
-    if not best_audio:
-        yield best_video
-        return
-
-    yield {
-        "format_id": f"{best_video['format_id']}+{best_audio['format_id']}",
-        "ext": best_video["ext"],
-        "requested_formats": [best_video, best_audio],
-        "protocol": f"{best_video.get('protocol', '')}+{best_audio.get('protocol', '')}",
-    }
-
-
 def _video_codec_label(vcodec: str) -> str:
     """Maps a raw codec string to a human-readable video codec name."""
     lowered = vcodec.lower()
@@ -324,6 +271,33 @@ def make_audio_format_spec(format_codec: str) -> str:
     if format_codec == "m4a":
         return "bestaudio[ext=m4a]/bestaudio/best"
     return "bestaudio/best"
+
+
+class VideoPreset(str, Enum):
+    """Codec presets for video downloads, mirroring the interactive wizard."""
+
+    UNIVERSAL = "universal"
+    BEST = "best"
+
+
+def make_video_format_spec(preset: VideoPreset, max_height: int | None = None) -> str:
+    """
+    Builds a video format selector for the given preset, optionally capped to a
+    maximum height. The universal preset pairs H.264 video with AAC audio so the
+    result merges into MP4; the best preset takes yt-dlp's highest ranked formats
+    (usually AV1/VP9) and keeps their native container.
+
+    Each branch ends in an uncapped fallback so an over-tight --res degrades to
+    the nearest available quality instead of failing the download.
+    """
+    cap = f"[height<={max_height}]" if max_height else ""
+    if preset is VideoPreset.UNIVERSAL:
+        return (
+            f"bestvideo[vcodec^=avc1]{cap}+bestaudio[ext=m4a]/best[ext=mp4]{cap}/best"
+        )
+    if not cap:
+        return "bestvideo+bestaudio/best"
+    return f"bestvideo{cap}+bestaudio/best{cap}/best"
 
 
 # =====================================================================
@@ -470,7 +444,7 @@ def get_video_info(
 
     with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
         info = ydl.extract_info(url, download=False)
-        return cast(dict[str, Any], info)
+        return cast(Any, info)
 
 
 def download_video(
@@ -609,9 +583,7 @@ def download_from_info_json(
         with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
             code = int(ydl.download_with_info_file(info_file))
     except DownloadError as e:
-        Console().print(
-            f"[bold red]❌ Download error: {strip_ansi(str(e))}[/bold red]"
-        )
+        Console().print(f"[bold red]❌ Download error: {strip_ansi(str(e))}[/bold red]")
         return 1
     except Exception as e:
         Console().print(f"[bold red]❌ Download error: {strip_ansi(str(e))}[/bold red]")
@@ -987,9 +959,7 @@ def do_download_interactive(
         )
     )
 
-    choice = Prompt.ask(
-        "Select download type", choices=valid_choices, default="1"
-    )
+    choice = Prompt.ask("Select download type", choices=valid_choices, default="1")
 
     opts: dict[str, Any] = {}
     target_dir = get_default_video_dir()
@@ -1374,11 +1344,14 @@ def interactive_cmd() -> None:
 def info(
     url: Annotated[str, Argument(help="The video URL to extract info from")],
     save: Annotated[
-        bool, Option("--save", "-s", help="Save info to a .info.json file")
+        bool,
+        Option(
+            "--save", help="Save info to a .info.json file in the current directory"
+        ),
     ] = False,
     output: Annotated[
         str | None,
-        Option("--output", "-o", help="Custom output filename for the JSON"),
+        Option("--output", "-o", help="Directory to save the .info.json file to"),
     ] = None,
     cookies_from_browser: Annotated[
         str | None,
@@ -1410,15 +1383,21 @@ def info(
 
     if save or output:
         sanitized = yt_dlp.YoutubeDL().sanitize_info(cast(Any, video_info))
-        out_filename = output or f"{video_info.get('title', 'video')}.info.json"
+        # Sanitize the file name only, never the directory: stripping characters
+        # from a full path would mangle Windows separators.
         out_filename = "".join(
-            [c for c in out_filename if c.isalnum() or c in " ._-"]
+            c
+            for c in f"{video_info.get('title', 'video')}.info.json"
+            if c.isalnum() or c in " ._-"
         ).strip()
+        out_dir = Path(output) if output else Path.cwd()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / out_filename
 
-        with open(out_filename, "w", encoding="utf-8") as f:
+        with open(out_path, "w", encoding="utf-8") as f:
             json.dump(sanitized, f, indent=4)
         console.print(
-            f"\n[bold green]✓[/bold green] Saved metadata to: [cyan]{out_filename}[/cyan]"
+            f"\n[bold green]✓[/bold green] Saved metadata to: [cyan]{out_path}[/cyan]"
         )
 
 
@@ -1434,28 +1413,32 @@ def download(
         Option(
             "--output-dir",
             "-o",
-            help="Target directory for downloaded file (defaults to ~/Downloads/video or ~/Downloads/audio for audio)",
+            help="Target directory for downloaded file (defaults to ~/Downloads/video)",
+        ),
+    ] = None,
+    preset: Annotated[
+        VideoPreset,
+        Option(
+            "--preset",
+            "-p",
+            help="Codec preset: 'universal' (H.264 + AAC, plays anywhere) or 'best' (highest quality, native container)",
+        ),
+    ] = VideoPreset.UNIVERSAL,
+    max_height: Annotated[
+        int | None,
+        Option(
+            "--res",
+            help="Maximum resolution height (e.g. 720); picks the best available at or below it",
         ),
     ] = None,
     format_code: Annotated[
         str | None,
-        Option("--format", "-f", help="Format code (e.g. 'bestvideo+bestaudio')"),
-    ] = None,
-    custom_format: Annotated[
-        bool,
         Option(
-            "--custom-selector",
-            "-c",
-            help="Use custom format selector to prefer MP4/WebM and avoid MKV",
+            "--format",
+            "-f",
+            help="Raw yt-dlp format code or selector (e.g. '137+140'); cannot be combined with --preset/--res",
         ),
-    ] = False,
-    audio_only: Annotated[
-        bool, Option("--audio", "-a", help="Download and extract audio only")
-    ] = False,
-    audio_codec: Annotated[
-        str,
-            Option("--audio-format", help="Audio format codec to extract (e.g. m4a, opus, mp3)"),
-    ] = "m4a",
+    ] = None,
     min_duration: Annotated[
         int | None,
         Option(
@@ -1512,6 +1495,7 @@ def download(
         str,
         Option(
             "--sub-langs",
+            "-l",
             help="Comma-separated subtitle languages (e.g. 'en', 'ar', 'all')",
         ),
     ] = "en",
@@ -1537,32 +1521,32 @@ def download(
         )
         raise typer.Exit(code=1)
 
+    if max_height is not None and max_height <= 0:
+        console.print("[bold red]Error: --res must be a positive number.[/bold red]")
+        raise typer.Exit(code=1)
+
+    if format_code and (preset is not VideoPreset.UNIVERSAL or max_height is not None):
+        console.print(
+            "[bold red]Error: --format cannot be combined with --preset or --res. "
+            "Use --format on its own for full control over format selection.[/bold red]"
+        )
+        raise typer.Exit(code=1)
+
     if url:
         url = parse_cli_url(url)
 
-    target_dir: Path
-    if output_dir:
-        target_dir = Path(output_dir)
-    elif audio_only:
-        target_dir = get_default_music_dir()
-    else:
-        target_dir = get_default_video_dir()
+    target_dir: Path = Path(output_dir) if output_dir else get_default_video_dir()
 
     opts: dict[str, Any] = {}
 
     # Setup formats
-    if audio_only:
-        opts["format"] = make_audio_format_spec(audio_codec)
-        opts["postprocessors"] = [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": audio_codec,
-            }
-        ]
-    elif custom_format:
-        opts["format"] = format_selector
-    elif format_code:
+    if format_code:
         opts["format"] = format_code
+    else:
+        opts["format"] = make_video_format_spec(preset, max_height)
+        if preset is VideoPreset.UNIVERSAL:
+            opts["merge_output_format"] = "mp4"
+            opts["remux_video"] = "mp4"
 
     # Setup duration filter
     if min_duration is not None or max_duration is not None:
@@ -1648,6 +1632,7 @@ def audio(
         str,
         Option(
             "--sub-langs",
+            "-l",
             help="Comma-separated subtitle languages (e.g. 'en', 'ar', 'all')",
         ),
     ] = "en",
@@ -1727,24 +1712,24 @@ def subs(
             help="Target directory for downloaded subtitles (defaults to ~/Downloads/video)",
         ),
     ] = None,
-    langs: Annotated[
+    sub_langs: Annotated[
         str,
         Option(
-            "--langs",
+            "--sub-langs",
             "-l",
             help="Comma-separated subtitle languages (e.g. 'en', 'ar', 'all')",
         ),
     ] = "en",
-    auto: Annotated[
+    auto_subs: Annotated[
         bool,
         Option(
-            "--auto/--no-auto",
+            "--auto-subs/--no-auto-subs",
             help="Include auto-generated subtitles if official not available",
         ),
     ] = True,
-    format: Annotated[
+    sub_format: Annotated[
         str,
-        Option("--format", "-f", help="Subtitle format (srt, vtt, best)"),
+        Option("--sub-format", "-f", help="Subtitle format (srt, vtt, best)"),
     ] = "srt",
     cookies_from_browser: Annotated[
         str | None,
@@ -1765,15 +1750,15 @@ def subs(
     url = parse_cli_url(url)
     target_dir = Path(output_dir) if output_dir else get_default_video_dir()
     console.print(
-        f"[blue]Downloading subtitles ({langs}, {format}) to [cyan]{target_dir}[/cyan] from: [cyan]{url}[/cyan][/blue]"
+        f"[blue]Downloading subtitles ({sub_langs}, {sub_format}) to [cyan]{target_dir}[/cyan] from: [cyan]{url}[/cyan][/blue]"
     )
     error_code = report_subtitle_download(
         url,
         target_dir,
         console,
-        langs=langs,
-        auto_subs=auto,
-        sub_format=format,
+        langs=sub_langs,
+        auto_subs=auto_subs,
+        sub_format=sub_format,
         cookies_from_browser=cookies_from_browser,
         verbose=verbose,
     )
