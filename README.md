@@ -1,6 +1,7 @@
 # ⚡ ydlx (yt-dlp eXtended)
 
 [![PyPI version](https://img.shields.io/pypi/v/ydlx)](https://pypi.org/project/ydlx/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/ydlx?label=downloads%2Fmonth)](https://pypi.org/project/ydlx/)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://pypi.org/project/ydlx/)
 [![License](https://img.shields.io/pypi/l/ydlx)](https://github.com/yousefmrashad/ydlx/blob/master/LICENSE)
 
