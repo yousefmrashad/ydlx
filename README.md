@@ -21,7 +21,7 @@ A modern, fast, interactive CLI dashboard and downloader built on top of [yt-dlp
 - 🎵 **Dedicated Audio Extraction**: One-command audio downloading with format conversion (M4A, MP3, WAV, FLAC).
 - 💬 **Subtitles & Closed Captions**: Download separate `.srt` files, embed subtitles into video files, or download subtitles only without fetching the video.
 - 🛡️ **SponsorBlock Integration**: Seamlessly skip sponsors and self-promotions with `--sponsorblock` / `-s`.
-- 🍪 **Browser Cookie Extraction**: Avoid 403 Forbidden / bot-detection errors by loading cookies directly from Chrome, Firefox, Edge, Brave, Safari, or Opera.
+- 🍪 **Cookie Support**: Avoid 403 Forbidden / bot-detection errors by loading cookies directly from your browser, or from a `cookies.txt` file.
 - 🎨 **Rich UI**: Beautiful formatted metadata tables and download progress bars with native UTF-8 support.
 
 ---
@@ -82,6 +82,8 @@ ydlx
 ```
 This opens the interactive dashboard where you can inspect metadata, choose resolutions, extract audio, download subtitles, and manage cookies.
 
+For a single video the wizard lists every available resolution to pick from. A playlist has no shared format list — each entry carries its own format IDs — so the wizard instead caps the height (`720p`, `1080p`, …) and applies it per video, the same as `--res`.
+
 ### 2. Download Video / Playlist
 ```bash
 # Download Universal MP4 (H.264 + AAC) to ~/Downloads/video
@@ -89,6 +91,9 @@ ydlx download "https://www.youtube.com/watch?v=..."
 
 # Cap the resolution (picks the best available at or below it)
 ydlx download "https://www.youtube.com/watch?v=..." --res 1080
+
+# Same cap applied to every video in a playlist
+ydlx download "https://www.youtube.com/playlist?list=..." --res 1080
 
 # Highest quality instead (AV1/VP9, native container)
 ydlx download "https://www.youtube.com/watch?v=..." --preset best --res 720
@@ -152,12 +157,29 @@ ydlx info "https://www.youtube.com/watch?v=..." -o "./metadata"
 | Flag | Meaning |
 |---|---|
 | `-o` | Output directory |
-| `-b` | Extract cookies from browser (chrome, firefox, edge, brave, safari, opera) |
+| `-b`, `--cookies-from-browser` | Extract cookies from browser (brave, chrome, chromium, edge, firefox, opera, safari, vivaldi, whale) |
+| `--cookies` | Path to a Netscape `cookies.txt` file |
 | `-l` | Comma-separated subtitle languages |
 | `-S` | Download subtitles as a separate file |
 | `--auto-subs` / `--no-auto-subs` | Include auto-generated captions |
 | `-s` | Skip sponsor segments via SponsorBlock |
 | `-v` | Verbose output |
+
+Cookie flags take precedence over saved settings: passing `-b` or `--cookies` overrides the source stored in the interactive menu entirely, so a flag never silently merges with a previously saved one. Pass both flags together if you deliberately want a `cookies.txt` layered over browser cookies. Passing neither uses the saved source.
+
+### Cookies
+
+Cookie reads fail on some setups, and ydlx explains the common cases instead of printing a raw yt-dlp error:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Failed to decrypt with DPAPI` | Chrome/Edge encrypt cookies with App-Bound Encryption on Windows, which yt-dlp cannot decrypt ([yt-dlp#10927](https://github.com/yt-dlp/yt-dlp/issues/10927)) | Use `--cookies-from-browser firefox` (or brave, vivaldi, opera, chromium), or export a `cookies.txt` and pass `--cookies` |
+| `Could not copy ... cookie database` | The browser holds a lock on its cookie DB ([yt-dlp#7271](https://github.com/yt-dlp/yt-dlp/issues/7271)) | Close the browser completely, then retry — a running browser also hides freshly written cookies |
+| `Cookies file must be Netscape formatted, not JSON` | A JSON cookie export was passed to `--cookies` | Export with a Netscape-format extension such as *Get cookies.txt LOCALLY* |
+
+On macOS and Linux all supported browsers work: App-Bound Encryption is Windows-only.
+
+To create a `cookies.txt`, install the **Get cookies.txt LOCALLY** extension, log in to the site, and export from the extension. The file is plain tab-separated text, and ydlx validates the path up front because yt-dlp silently ignores a `cookies.txt` it cannot read.
 
 ---
 

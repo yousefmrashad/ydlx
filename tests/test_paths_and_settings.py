@@ -12,7 +12,6 @@ from ydlx import (
     get_default_video_dir,
     get_saved_cookie_source,
     load_settings,
-    resolve_cookie_source,
     save_settings,
 )
 
@@ -105,26 +104,6 @@ def test_saved_cookie_source_returns_none_when_unset() -> None:
 def test_saved_cookie_source_is_string() -> None:
     save_settings({"cookies_from_browser": "brave"})
     assert get_saved_cookie_source() == "brave"
-
-
-def test_resolve_cookie_source_prefers_explicit_argument() -> None:
-    save_settings({"cookies_from_browser": "firefox"})
-    assert resolve_cookie_source("chrome") == "chrome"
-
-
-def test_resolve_cookie_source_falls_back_to_saved() -> None:
-    save_settings({"cookies_from_browser": "firefox"})
-    assert resolve_cookie_source(None) == "firefox"
-
-
-def test_resolve_cookie_source_returns_none_when_nothing_set() -> None:
-    assert resolve_cookie_source(None) is None
-
-
-def test_resolve_cookie_source_handles_empty_string() -> None:
-    """An empty string must fall through to the saved value, not win as a value."""
-    save_settings({"cookies_from_browser": "firefox"})
-    assert resolve_cookie_source("") == "firefox"
 
 
 def test_settings_written_are_valid_utf8_json(isolated_config_dir: Path) -> None:

@@ -40,8 +40,34 @@ app = Typer(
     no_args_is_help=False,
 )
 
-# Global session variable for browser cookies in interactive mode
+# Global session variables for cookies in interactive mode
 session_cookies_browser: str | None = None
+session_cookies_file: str | None = None
+
+# Every browser whose cookie store yt-dlp knows how to read. Chrome and Edge
+# encrypt cookies with App-Bound Encryption on Windows, so extraction fails
+# there; the others still use keyring/DPAPI encryption yt-dlp can handle.
+SUPPORTED_BROWSERS: tuple[str, ...] = (
+    "brave",
+    "chrome",
+    "chromium",
+    "edge",
+    "firefox",
+    "opera",
+    "safari",
+    "vivaldi",
+    "whale",
+)
+
+BROWSER_OPTION_HELP = (
+    "Extract cookies from browser ("
+    + ", ".join(SUPPORTED_BROWSERS)
+    + "); chrome and edge cannot be read on Windows, prefer firefox or brave"
+)
+COOKIE_FILE_OPTION_HELP = (
+    'Path to a Netscape cookies.txt file (export it with a "Get cookies.txt '
+    'LOCALLY" extension when your browser cannot be read directly)'
+)
 
 # =====================================================================
 # Custom Logger and Progress Tracker
@@ -53,6 +79,14 @@ ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 def strip_ansi(text: str) -> str:
     """Remove ANSI escape sequences from yt-dlp messages."""
     return ANSI_ESCAPE_RE.sub("", text)
+
+
+def collapse_error_prefixes(text: str) -> str:
+    """
+    Flattens the repeated "ERROR: " prefixes yt-dlp stacks when it re-raises
+    text that a logger already reported, e.g. "ERROR: ERROR: Failed to ...".
+    """
+    return re.sub(r"(?:ERROR:\s*)+", "", strip_ansi(text)).strip()
 
 
 class MyLogger:
@@ -86,7 +120,13 @@ class MyLogger:
         self.console.print(f"[yellow]⚠️  Warning: {strip_ansi(msg)}[/yellow]")
 
     def error(self, msg: str) -> None:
-        self.console.print(f"[bold red]❌ Error: {strip_ansi(msg)}[/bold red]")
+        clean = collapse_error_prefixes(msg)
+        # Cookie failures are re-raised and reported once with actionable
+        # guidance by report_failure; echoing the raw text here as well is what
+        # produced the same yt-dlp error three times over.
+        if cookie_failure_hint(clean):
+            return
+        self.console.print(f"[bold red]❌ Error: {clean}[/bold red]")
 
 
 class DownloadTracker:
@@ -375,9 +415,103 @@ def get_saved_cookie_source() -> str | None:
     return str(value) if value else None
 
 
-def resolve_cookie_source(cookies_from_browser: str | None) -> str | None:
-    """Prefers an explicitly passed browser, otherwise falls back to the saved one."""
-    return cookies_from_browser or get_saved_cookie_source()
+def get_saved_cookie_file() -> str | None:
+    """Returns the persisted cookies.txt path, if any."""
+    value = load_settings().get("cookiefile")
+    return str(value) if value else None
+
+
+def apply_cookie_opts(
+    ydl_opts: dict[str, Any],
+    cookies_from_browser: str | None = None,
+    cookie_file: str | None = None,
+) -> None:
+    """
+    Applies the resolved cookie sources to ydl_opts.
+
+    Explicit arguments are authoritative: passing either one discards the
+    persisted settings, so `-b firefox` never silently merges in a previously
+    saved cookies.txt. Passing neither uses the saved source. Supplying both
+    explicitly is honored, since yt-dlp merges cookiesfrombrowser with
+    cookiefile and gives file entries precedence.
+    """
+    if cookies_from_browser or cookie_file:
+        browser = cookies_from_browser or None
+        resolved_file = cookie_file or None
+    else:
+        browser = get_saved_cookie_source()
+        resolved_file = get_saved_cookie_file()
+
+    if browser:
+        ydl_opts["cookiesfrombrowser"] = (browser,)
+    if resolved_file:
+        ydl_opts["cookiefile"] = resolved_file
+
+
+# =====================================================================
+# Cookie Failure Diagnostics
+# =====================================================================
+
+# yt-dlp issue numbers quoted in cookie guidance. Quoted by number instead of
+# URL because these messages print on a narrow terminal, where a bare link
+# pushes the actual fix off-screen; README.md links both.
+DPAPI_ISSUE = 10927
+COOKIE_LOCK_ISSUE = 7271
+
+
+def cookie_failure_hint(message: str) -> str | None:
+    """
+    Turns a yt-dlp cookie failure into actionable guidance, or None when the
+    error is unrelated to cookies. Pure text matching so it stays testable.
+
+    Issue numbers are referenced without URLs: this text is printed on a narrow
+    terminal, and a bare link buries the actual fix. README.md carries the
+    full table of links.
+    """
+    lowered = message.lower()
+    if "dpapi" in lowered or "app-bound" in lowered:
+        return (
+            "This browser encrypts cookies with App-Bound Encryption on Windows, "
+            "which yt-dlp cannot decrypt. Use --cookies-from-browser firefox, "
+            "brave, vivaldi, opera, or chromium, or export cookies.txt with a "
+            '"Get cookies.txt LOCALLY" extension and pass --cookies FILE '
+            f"(yt-dlp issue {DPAPI_ISSUE})."
+        )
+    if "cookie database" in lowered and (
+        "copy" in lowered or "permission" in lowered or "lock" in lowered
+    ):
+        return (
+            "The browser's cookie database could not be read. Close the browser "
+            "completely so its cookies are flushed to disk, then retry "
+            f"(yt-dlp issue {COOKIE_LOCK_ISSUE})."
+        )
+    if "netscape" in lowered:
+        return (
+            "That file is not in Netscape cookies.txt format. Export cookies with "
+            'a "Get cookies.txt LOCALLY" extension; a JSON export cannot be used.'
+        )
+    if "failed to load cookies" in lowered:
+        return (
+            "No cookies could be loaded. Check the browser profile name, or the "
+            "cookies.txt path."
+        )
+    return None
+
+
+def report_failure(message: str, console: Console, prefix: str = "Error") -> None:
+    """
+    Reports a failure exactly once.
+
+    A cookie problem prints only actionable guidance: yt-dlp's own message is
+    typically a duplicated "ERROR: ERROR: ..." line whose link the guidance
+    already carries, so repeating it only buries the fix.
+    """
+    clean = collapse_error_prefixes(message)
+    hint = cookie_failure_hint(clean)
+    if hint:
+        console.print(f"[yellow]💡 {hint}[/yellow]")
+        return
+    console.print(f"[bold red]❌ {prefix}: {clean}[/bold red]")
 
 
 # =====================================================================
@@ -412,6 +546,24 @@ def parse_cli_url(url: str) -> str:
     return normalized
 
 
+def parse_cookie_file(cookie_file: str) -> str:
+    """
+    Validates a --cookies argument, exiting with an error when it is unusable.
+
+    yt-dlp silently ignores a cookie file it cannot read, so a mistyped path
+    would otherwise download without cookies and only fail as a confusing 403.
+    """
+    expanded = str(Path(os.path.expanduser(cookie_file)))
+    if not Path(expanded).is_file():
+        Console().print(f"[bold red]❌ Cookies file not found: {expanded}[/bold red]")
+        Console().print(
+            '[yellow]💡 Export one with a "Get cookies.txt LOCALLY" browser '
+            "extension, or pass --cookies-from-browser instead.[/yellow]"
+        )
+        raise typer.Exit(code=1)
+    return expanded
+
+
 def prompt_for_url(console: Console) -> str:
     """Prompts until the user enters a usable video URL."""
     while True:
@@ -430,18 +582,19 @@ def prompt_for_url(console: Console) -> str:
 
 
 def get_video_info(
-    url: str, cookies_from_browser: str | None = None, verbose: bool = False
+    url: str,
+    cookies_from_browser: str | None = None,
+    cookie_file: str | None = None,
+    verbose: bool = False,
 ) -> dict[str, Any]:
     """Extract video metadata without downloading it."""
-    cookies_from_browser = resolve_cookie_source(cookies_from_browser)
     ydl_opts: dict[str, Any] = {
         "logger": MyLogger(verbose=verbose),
         "quiet": not verbose,
         "color": "never",
         "remote_components": ["ejs:github"],
     }
-    if cookies_from_browser:
-        ydl_opts["cookiesfrombrowser"] = (cookies_from_browser,)
+    apply_cookie_opts(ydl_opts, cookies_from_browser, cookie_file)
 
     with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -452,11 +605,11 @@ def download_video(
     url: str,
     opts_override: dict[str, Any] | None = None,
     cookies_from_browser: str | None = None,
+    cookie_file: str | None = None,
     output_dir: str | Path | None = None,
     verbose: bool = False,
 ) -> int:
     """Download a video with optional custom configurations."""
-    cookies_from_browser = resolve_cookie_source(cookies_from_browser)
     target_dir = Path(output_dir) if output_dir else get_default_video_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -475,8 +628,7 @@ def download_video(
         "remote_components": ["ejs:github"],
     }
 
-    if cookies_from_browser:
-        ydl_opts["cookiesfrombrowser"] = (cookies_from_browser,)
+    apply_cookie_opts(ydl_opts, cookies_from_browser, cookie_file)
 
     if opts_override:
         ydl_opts.update(opts_override)
@@ -500,10 +652,10 @@ def download_video(
             retry_opts["progress_hooks"] = [DownloadTracker().hook]
             with yt_dlp.YoutubeDL(cast(Any, retry_opts)) as ydl:
                 return int(ydl.download([url]))
-        Console().print(f"[bold red]❌ Download error: {msg}[/bold red]")
+        report_failure(msg, Console(), "Download error")
         return 1
     except Exception as e:
-        Console().print(f"[bold red]❌ Download error: {strip_ansi(str(e))}[/bold red]")
+        report_failure(str(e), Console(), "Download error")
         return 1
 
     if ydl_opts["logger"].already_downloaded:
@@ -522,6 +674,7 @@ def download_audio(
     url: str,
     format_codec: str = "m4a",
     cookies_from_browser: str | None = None,
+    cookie_file: str | None = None,
     output_dir: str | Path | None = None,
     opts_override: dict[str, Any] | None = None,
     sponsorblock: bool = False,
@@ -548,6 +701,7 @@ def download_audio(
         url,
         opts_override=opts,
         cookies_from_browser=cookies_from_browser,
+        cookie_file=cookie_file,
         output_dir=target_dir,
         verbose=verbose,
     )
@@ -557,11 +711,11 @@ def download_from_info_json(
     info_file: str,
     opts_override: dict[str, Any] | None = None,
     cookies_from_browser: str | None = None,
+    cookie_file: str | None = None,
     output_dir: str | Path | None = None,
     verbose: bool = False,
 ) -> int:
     """Download video using an existing info.json file."""
-    cookies_from_browser = resolve_cookie_source(cookies_from_browser)
     target_dir = Path(output_dir) if output_dir else get_default_video_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -574,8 +728,7 @@ def download_from_info_json(
         "color": "never",
     }
 
-    if cookies_from_browser:
-        ydl_opts["cookiesfrombrowser"] = (cookies_from_browser,)
+    apply_cookie_opts(ydl_opts, cookies_from_browser, cookie_file)
 
     if opts_override:
         ydl_opts.update(opts_override)
@@ -584,10 +737,10 @@ def download_from_info_json(
         with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
             code = int(ydl.download_with_info_file(info_file))
     except DownloadError as e:
-        Console().print(f"[bold red]❌ Download error: {strip_ansi(str(e))}[/bold red]")
+        report_failure(str(e), Console(), "Download error")
         return 1
     except Exception as e:
-        Console().print(f"[bold red]❌ Download error: {strip_ansi(str(e))}[/bold red]")
+        report_failure(str(e), Console(), "Download error")
         return 1
 
     if ydl_opts["logger"].already_downloaded:
@@ -656,6 +809,7 @@ def download_subtitles_only(
     auto_subs: bool = True,
     sub_format: str = "srt",
     cookies_from_browser: str | None = None,
+    cookie_file: str | None = None,
     output_dir: str | Path | None = None,
     verbose: bool = False,
 ) -> int:
@@ -698,6 +852,7 @@ def download_subtitles_only(
         url,
         opts_override=opts,
         cookies_from_browser=cookies_from_browser,
+        cookie_file=cookie_file,
         output_dir=target_dir,
         verbose=verbose,
     )
@@ -712,6 +867,7 @@ def report_subtitle_download(
     auto_subs: bool,
     sub_format: str,
     cookies_from_browser: str | None,
+    cookie_file: str | None = None,
     verbose: bool = False,
 ) -> int:
     """Download subtitles and report how many files landed; returns an exit code."""
@@ -722,6 +878,7 @@ def report_subtitle_download(
         auto_subs=auto_subs,
         sub_format=sub_format,
         cookies_from_browser=cookies_from_browser,
+        cookie_file=cookie_file,
         output_dir=target_dir,
         verbose=verbose,
     )
@@ -906,21 +1063,56 @@ def print_video_info(info: dict[str, Any], console: Console) -> None:
             console.print(audio_table)
 
 
+def prompt_for_max_height(console: Console) -> int | None:
+    """
+    Prompts for a resolution cap, accepting a bare number or the "p" suffix the
+    prompt suggests ("720p"). Blank or 0 means no limit; returns None so
+    make_video_format_spec leaves the selector uncapped.
+    """
+    while True:
+        console.print(
+            "[dim]Common heights: 360p, 480p, 720p, 1080p, 1440p, 2160p "
+            "(0 = highest available)[/dim]"
+        )
+        raw = Prompt.ask("Maximum resolution height (e.g. 720p)", default="0").strip()
+        # Accept exactly what the prompt advertises, plus a stray space before
+        # the "p"; anything else re-prompts rather than being guessed at.
+        cleaned = raw.lower()
+        if cleaned.endswith("p"):
+            cleaned = cleaned[:-1].strip()
+        if not cleaned:
+            return None
+        try:
+            value = int(cleaned)
+        except ValueError:
+            console.print(
+                "[bold red]❌ Enter a height like 720p, or 0 for no limit.[/bold red]"
+            )
+            continue
+        if value < 0:
+            console.print(
+                "[bold red]❌ Height must be 0 or a positive number.[/bold red]"
+            )
+            continue
+        return value or None
+
+
 def do_download_interactive(
     url: str, info: dict[str, Any] | None = None, console: Console | None = None
 ) -> None:
     """Sub-menu to choose download settings interactively."""
-    global session_cookies_browser
     if console is None:
         console = Console()
     if info is None:
         with console.status("[bold blue]Fetching metadata...[/bold blue]"):
             try:
-                info = get_video_info(url, cookies_from_browser=session_cookies_browser)
-            except Exception as e:
-                console.print(
-                    f"[bold red]Error: Failed to fetch metadata: {e}[/bold red]"
+                info = get_video_info(
+                    url,
+                    cookies_from_browser=session_cookies_browser,
+                    cookie_file=session_cookies_file,
                 )
+            except Exception as e:
+                report_failure(f"Failed to fetch metadata: {e}", console, "Error")
                 return
 
     is_playlist = info.get("_type") == "playlist"
@@ -929,9 +1121,14 @@ def do_download_interactive(
         "[bold cyan]1.[/bold cyan] 🚀 Best Quality",
         "[cyan]Default Video + Audio combined (Auto)[/cyan]",
     )
+    quality_hint = (
+        "[green]Cap the height per video, with an AV1/VP9 or H.264/AAC preset[/green]"
+        if is_playlist
+        else "[green]Pick quality (AV1/VP9) or compatibility (H.264/AAC) per resolution[/green]"
+    )
     menu_table.add_row(
         "[bold green]2.[/bold green] 🎨 Choose Resolution & Preset",
-        "[green]Pick quality (AV1/VP9) or compatibility (H.264/AAC) per resolution[/green]",
+        quality_hint,
     )
     menu_table.add_row(
         "[bold bright_yellow]3.[/bold bright_yellow] 🎯 Choose Specific Format ID",
@@ -976,18 +1173,22 @@ def do_download_interactive(
             "  [cyan]2[/cyan]. 📱 Universal — H.264 + AAC (plays on any device)"
         )
         universal = Prompt.ask("Select preset", choices=["1", "2"], default="1") == "2"
-        if info.get("_type") == "playlist":
-            console.print(
-                "[yellow]⚠️ Per-resolution selection only works for single videos; "
-                "the playlist uses the preset's auto mode.[/yellow]"
-            )
-            if universal:
-                opts["format"] = (
-                    "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]/best"
-                )
+        preset = VideoPreset.UNIVERSAL if universal else VideoPreset.BEST
+
+        if is_playlist:
+            # Every entry has its own format ids, so a per-resolution list built
+            # from playlist metadata would be meaningless. Cap by height instead:
+            # yt-dlp evaluates the selector per entry, which is exactly what the
+            # CLI's --res does.
+            max_height = prompt_for_max_height(console)
+            opts["format"] = make_video_format_spec(preset, max_height)
+            if preset is VideoPreset.UNIVERSAL:
                 opts["merge_output_format"] = "mp4"
-            else:
-                opts["format"] = "bestvideo+bestaudio/best"
+                opts["remux_video"] = "mp4"
+            cap_note = f" (capped at {max_height}p)" if max_height else " (uncapped)"
+            console.print(
+                f"[green]✓ {preset.value} preset applied to every video{cap_note}[/green]"
+            )
         else:
             choices_list = get_preset_format_choices(info, universal=universal)
             preset_label = (
@@ -1074,6 +1275,7 @@ def do_download_interactive(
         url,
         opts_override=opts,
         cookies_from_browser=session_cookies_browser,
+        cookie_file=session_cookies_file,
         output_dir=target_dir,
     )
     if error_code:
@@ -1084,14 +1286,19 @@ def do_download_interactive(
 
 def run_interactive_menu() -> None:
     """Runs the main CLI prompt-driven dashboard loop."""
-    global session_cookies_browser
+    global session_cookies_browser, session_cookies_file
     if session_cookies_browser is None:
         session_cookies_browser = get_saved_cookie_source()
+    if session_cookies_file is None:
+        session_cookies_file = get_saved_cookie_file()
     console = Console()
     while True:
+        active_cookies = [
+            part for part in (session_cookies_browser, session_cookies_file) if part
+        ]
         cookies_status = (
-            f"[bold green]{session_cookies_browser}[/bold green]"
-            if session_cookies_browser
+            " [bold green]+[/bold green] ".join(active_cookies)
+            if active_cookies
             else "[yellow]None[/yellow]"
         )
 
@@ -1117,8 +1324,8 @@ def run_interactive_menu() -> None:
             "[bright_yellow]Download using cached info.json metadata[/bright_yellow]",
         )
         menu_table.add_row(
-            "[bold blue]6.[/bold blue] 🍪 Set Browser Cookies Source",
-            f"[blue]Load cookies from browser (Active: {cookies_status})[/blue]",
+            "[bold blue]6.[/bold blue] 🍪 Set Cookie Source",
+            f"[blue]Use browser cookies or a cookies.txt file (Active: {cookies_status})[/blue]",
         )
         menu_table.add_row(
             "[bold red]7.[/bold red] ❌ Exit", "[red]Close the application[/red]"
@@ -1145,17 +1352,20 @@ def run_interactive_menu() -> None:
             with console.status("[bold blue]Fetching metadata...[/bold blue]"):
                 try:
                     info = get_video_info(
-                        url, cookies_from_browser=session_cookies_browser
+                        url,
+                        cookies_from_browser=session_cookies_browser,
+                        cookie_file=session_cookies_file,
                     )
                 except Exception as e:
-                    console.print(f"[bold red]Error: Extraction failed: {e}[/bold red]")
+                    report_failure(f"Extraction failed: {e}", console, "Error")
                     continue
 
             print_video_info(info, console)
 
+            item_label = "playlist" if info.get("_type") == "playlist" else "video"
             console.print("\n[bold]Submenu Actions:[/bold]")
             console.print("1. [cyan]💾 Save metadata to info.json[/cyan]")
-            console.print("2. [green]📥 Download this video[/green]")
+            console.print(f"2. [green]📥 Download this {item_label}[/green]")
             console.print("3. [yellow]💬 Download subtitles only[/yellow]")
             console.print("4. [magenta]🎵 Download audio (M4A/Opus/MP3)[/magenta]")
             console.print("5. [red]↩ Back to main menu[/red]")
@@ -1164,7 +1374,7 @@ def run_interactive_menu() -> None:
             )
 
             if sub_choice == "1":
-                title_val = str(info.get("title", "video"))
+                title_val = str(info.get("title", item_label))
                 title_clean = "".join(
                     [c for c in title_val if c.isalnum() or c in " ._-"]
                 ).strip()
@@ -1201,6 +1411,7 @@ def run_interactive_menu() -> None:
                     auto_subs=auto_subs,
                     sub_format=sub_format,
                     cookies_from_browser=session_cookies_browser,
+                    cookie_file=session_cookies_file,
                 )
             elif sub_choice == "4":
                 codec = Prompt.ask(
@@ -1220,6 +1431,7 @@ def run_interactive_menu() -> None:
                     url,
                     codec,
                     cookies_from_browser=session_cookies_browser,
+                    cookie_file=session_cookies_file,
                     output_dir=music_dir,
                     sponsorblock=skip_sponsors,
                 )
@@ -1247,6 +1459,7 @@ def run_interactive_menu() -> None:
                 url,
                 codec,
                 cookies_from_browser=session_cookies_browser,
+                cookie_file=session_cookies_file,
                 output_dir=music_dir,
                 sponsorblock=skip_sponsors,
             )
@@ -1276,6 +1489,7 @@ def run_interactive_menu() -> None:
                 auto_subs=auto_subs,
                 sub_format=sub_format,
                 cookies_from_browser=session_cookies_browser,
+                cookie_file=session_cookies_file,
             )
 
         elif choice == "5":
@@ -1290,29 +1504,70 @@ def run_interactive_menu() -> None:
             _ = download_from_info_json(
                 info_file,
                 cookies_from_browser=session_cookies_browser,
+                cookie_file=session_cookies_file,
                 output_dir=video_dir,
             )
 
         elif choice == "6":
-            browser = Prompt.ask(
-                "Select browser to load cookies from (helps avoid 403 Forbidden errors)",
-                choices=[
-                    "none",
-                    "chrome",
-                    "firefox",
-                    "edge",
-                    "brave",
-                    "safari",
-                    "opera",
-                ],
-                default="none",
+            source = Prompt.ask(
+                "Choose a cookie source",
+                choices=["browser", "file", "none"],
+                default="browser",
             )
-            session_cookies_browser = None if browser == "none" else browser
-            save_settings({"cookies_from_browser": session_cookies_browser})
-            source_label = session_cookies_browser or "None"
-            console.print(
-                f"[bold green]✓ Browser cookies source set to: {source_label} (persisted)[/bold green]"
-            )
+            if source == "none":
+                session_cookies_browser = None
+                session_cookies_file = None
+                save_settings({"cookies_from_browser": None, "cookiefile": None})
+                console.print("[bold green]✓ Cookies disabled (persisted)[/bold green]")
+            elif source == "browser":
+                console.print(
+                    "[dim]chrome and edge encrypt cookies with App-Bound Encryption "
+                    "on Windows and cannot be read; prefer firefox, brave, vivaldi, "
+                    "opera, or chromium.[/dim]"
+                )
+                browser = Prompt.ask(
+                    "Select browser to load cookies from (helps avoid 403 Forbidden errors)",
+                    choices=["none", *SUPPORTED_BROWSERS],
+                    default=session_cookies_browser or "none",
+                )
+                session_cookies_browser = None if browser == "none" else browser
+                # Switching source kinds: clear the other one so the active
+                # source shown in the menu stays unambiguous.
+                session_cookies_file = None
+                save_settings(
+                    {
+                        "cookies_from_browser": session_cookies_browser,
+                        "cookiefile": None,
+                    }
+                )
+                source_label = session_cookies_browser or "None"
+                console.print(
+                    f"[bold green]✓ Browser cookies source set to: {source_label} (persisted)[/bold green]"
+                )
+            else:
+                raw_path = Prompt.ask(
+                    "Path to cookies.txt",
+                    default=session_cookies_file or "",
+                ).strip()
+                if not raw_path:
+                    console.print(
+                        "[bold red]❌ No path given. Re-run and pick 'none' to clear cookies.[/bold red]"
+                    )
+                    continue
+                cookie_path = Path(os.path.expanduser(raw_path))
+                if not cookie_path.is_file():
+                    console.print(
+                        f"[bold red]❌ File not found: {cookie_path}[/bold red]"
+                    )
+                    continue
+                session_cookies_file = str(cookie_path)
+                session_cookies_browser = None
+                save_settings(
+                    {"cookies_from_browser": None, "cookiefile": session_cookies_file}
+                )
+                console.print(
+                    f"[bold green]✓ Cookies file set to: {session_cookies_file} (persisted)[/bold green]"
+                )
 
         elif choice == "7":
             console.print("[yellow]Goodbye![/yellow]")
@@ -1356,11 +1611,11 @@ def info(
     ] = None,
     cookies_from_browser: Annotated[
         str | None,
-        Option(
-            "--cookies-from-browser",
-            "-b",
-            help="Extract cookies from browser (chrome, firefox, edge, brave, safari, opera)",
-        ),
+        Option("--cookies-from-browser", "-b", help=BROWSER_OPTION_HELP),
+    ] = None,
+    cookies: Annotated[
+        str | None,
+        Option("--cookies", help=COOKIE_FILE_OPTION_HELP),
     ] = None,
     verbose: Annotated[
         bool, Option("--verbose", "-v", help="Show verbose output")
@@ -1371,13 +1626,18 @@ def info(
     """
     console = Console()
     url = parse_cli_url(url)
+    if cookies:
+        cookies = parse_cookie_file(cookies)
     with console.status("[bold blue]Fetching video metadata...[/bold blue]"):
         try:
             video_info = get_video_info(
-                url, cookies_from_browser=cookies_from_browser, verbose=verbose
+                url,
+                cookies_from_browser=cookies_from_browser,
+                cookie_file=cookies,
+                verbose=verbose,
             )
         except Exception as e:
-            console.print(f"[bold red]Error: Failed to extract info: {e}[/bold red]")
+            report_failure(f"Failed to extract info: {e}", console, "Error")
             raise typer.Exit(code=1) from e
 
     print_video_info(video_info, console)
@@ -1456,11 +1716,11 @@ def download(
     ] = None,
     cookies_from_browser: Annotated[
         str | None,
-        Option(
-            "--cookies-from-browser",
-            "-b",
-            help="Extract cookies from browser (chrome, firefox, edge, brave, safari, opera)",
-        ),
+        Option("--cookies-from-browser", "-b", help=BROWSER_OPTION_HELP),
+    ] = None,
+    cookies: Annotated[
+        str | None,
+        Option("--cookies", help=COOKIE_FILE_OPTION_HELP),
     ] = None,
     sponsorblock: Annotated[
         bool,
@@ -1535,6 +1795,8 @@ def download(
 
     if url:
         url = parse_cli_url(url)
+    if cookies:
+        cookies = parse_cookie_file(cookies)
 
     target_dir: Path = Path(output_dir) if output_dir else get_default_video_dir()
 
@@ -1580,6 +1842,7 @@ def download(
             info_json,
             opts_override=opts,
             cookies_from_browser=cookies_from_browser,
+            cookie_file=cookies,
             output_dir=target_dir,
             verbose=verbose,
         )
@@ -1594,6 +1857,7 @@ def download(
             url,
             opts_override=opts,
             cookies_from_browser=cookies_from_browser,
+            cookie_file=cookies,
             output_dir=target_dir,
             verbose=verbose,
         )
@@ -1646,11 +1910,11 @@ def audio(
     ] = True,
     cookies_from_browser: Annotated[
         str | None,
-        Option(
-            "--cookies-from-browser",
-            "-b",
-            help="Extract cookies from browser (chrome, firefox, edge, brave, safari, opera)",
-        ),
+        Option("--cookies-from-browser", "-b", help=BROWSER_OPTION_HELP),
+    ] = None,
+    cookies: Annotated[
+        str | None,
+        Option("--cookies", help=COOKIE_FILE_OPTION_HELP),
     ] = None,
     sponsorblock: Annotated[
         bool,
@@ -1669,6 +1933,8 @@ def audio(
     """
     console = Console()
     url = parse_cli_url(url)
+    if cookies:
+        cookies = parse_cookie_file(cookies)
     target_dir = Path(output_dir) if output_dir else get_default_music_dir()
     console.print(
         f"[blue]Extracting audio ({codec}) to [cyan]{target_dir}[/cyan] from: [cyan]{url}[/cyan][/blue]"
@@ -1688,6 +1954,7 @@ def audio(
         url,
         format_codec=codec,
         cookies_from_browser=cookies_from_browser,
+        cookie_file=cookies,
         output_dir=target_dir,
         opts_override=opts if opts else None,
         sponsorblock=sponsorblock,
@@ -1734,11 +2001,11 @@ def subs(
     ] = "srt",
     cookies_from_browser: Annotated[
         str | None,
-        Option(
-            "--cookies-from-browser",
-            "-b",
-            help="Extract cookies from browser (chrome, firefox, edge, brave, safari, opera)",
-        ),
+        Option("--cookies-from-browser", "-b", help=BROWSER_OPTION_HELP),
+    ] = None,
+    cookies: Annotated[
+        str | None,
+        Option("--cookies", help=COOKIE_FILE_OPTION_HELP),
     ] = None,
     verbose: Annotated[
         bool, Option("--verbose", "-v", help="Show verbose output")
@@ -1749,6 +2016,8 @@ def subs(
     """
     console = Console()
     url = parse_cli_url(url)
+    if cookies:
+        cookies = parse_cookie_file(cookies)
     target_dir = Path(output_dir) if output_dir else get_default_video_dir()
     console.print(
         f"[blue]Downloading subtitles ({sub_langs}, {sub_format}) to [cyan]{target_dir}[/cyan] from: [cyan]{url}[/cyan][/blue]"
@@ -1761,6 +2030,7 @@ def subs(
         auto_subs=auto_subs,
         sub_format=sub_format,
         cookies_from_browser=cookies_from_browser,
+        cookie_file=cookies,
         verbose=verbose,
     )
     if error_code:

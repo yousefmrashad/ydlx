@@ -78,3 +78,64 @@ def test_strip_ansi_removes_escape_sequences() -> None:
 
 def test_strip_ansi_leaves_plain_text_untouched() -> None:
     assert ydlx.strip_ansi("plain text") == "plain text"
+
+
+# --- Resolution prompt ---------------------------------------------------
+
+
+def answer_prompts(monkeypatch: pytest.MonkeyPatch, responses: list[str]) -> list[str]:
+    """Feeds scripted answers to Rich prompts and records what was asked."""
+    asked: list[str] = []
+    queue = list(responses)
+
+    def fake_ask(self: object, prompt: str = "", **kwargs: object) -> str:
+        asked.append(prompt)
+        return queue.pop(0)
+
+    monkeypatch.setattr(ydlx.Prompt, "ask", fake_ask, raising=False)
+    return asked
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("720p", 720),
+        ("720", 720),
+        (" 1080P ", 1080),
+        ("720 p", 720),
+        ("2160P", 2160),
+        # 0 and a blank answer both mean "no limit".
+        ("0", None),
+        ("0p", None),
+        ("", None),
+    ],
+)
+def test_prompt_for_max_height_accepts_common_input(
+    raw: str, expected: int | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The prompt suggests the "p" suffix, so it must also accept it."""
+    answer_prompts(monkeypatch, [raw])
+    assert ydlx.prompt_for_max_height(ydlx.Console()) == expected
+
+
+@pytest.mark.parametrize("bad", ["abc", "-5", "1080i", "720pp", "1,080"])
+def test_prompt_for_max_height_reprompts_on_bad_input(
+    bad: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = answer_prompts(monkeypatch, [bad, "480p"])
+    assert ydlx.prompt_for_max_height(ydlx.Console()) == 480
+    assert len(asked) == 2
+
+
+def test_prompt_for_max_height_suggests_common_heights(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-technical users need the common values spelled out."""
+    console = ydlx.Console()
+    monkeypatch.setattr(ydlx.Prompt, "ask", lambda self, p="", **k: "0")
+    with console.capture() as capture:
+        ydlx.prompt_for_max_height(console)
+    output = capture.get()
+    assert "720p" in output
+    assert "1080p" in output
+    assert "0 = highest available" in output
