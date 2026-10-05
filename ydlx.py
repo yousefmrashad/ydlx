@@ -962,9 +962,39 @@ def download_from_info_json(
     return code
 
 
+DEFAULT_SUB_LANGS = "en"
+
+
 def parse_sub_langs(sub_langs: str) -> list[str]:
     """Splits the comma-separated --sub-langs value, defaulting to English."""
-    return [lang.strip() for lang in sub_langs.split(",") if lang.strip()] or ["en"]
+    return [lang.strip() for lang in sub_langs.split(",") if lang.strip()] or [
+        DEFAULT_SUB_LANGS
+    ]
+
+
+def requested_sub_langs(sub_langs: str) -> list[str] | None:
+    """
+    Returns the languages to pin, or None to let yt-dlp choose.
+
+    yt-dlp fullmatch-es subtitleslangs, and only runs its own fallback chain when
+    the option is left unset. That chain is the better selector: it checks the
+    official tracks before the automatic captions, so a video whose official
+    English track is named "en-ehkg1hFWq8A" still resolves to that track. Pinning
+    "en" instead suppresses the chain and misses it entirely.
+
+    Pinning only when the user asked for something other than the default keeps
+    that behaviour intact for the common case, while an explicit -l ar is still
+    honoured exactly.
+    """
+    langs = parse_sub_langs(sub_langs)
+    return None if langs == [DEFAULT_SUB_LANGS] else langs
+
+
+def apply_sub_langs(opts: dict[str, Any], sub_langs: str) -> None:
+    """Pins subtitleslangs, or leaves it unset so yt-dlp selects the track."""
+    langs = requested_sub_langs(sub_langs)
+    if langs is not None:
+        opts["subtitleslangs"] = langs
 
 
 def configure_subtitles(
@@ -984,7 +1014,7 @@ def configure_subtitles(
     if auto_subs:
         opts["writeautomaticsub"] = True
 
-    opts["subtitleslangs"] = parse_sub_langs(sub_langs)
+    apply_sub_langs(opts, sub_langs)
 
     # "srt" is (almost) never a native source format; pick the best native
     # track and let the convertor below produce the .srt file.
@@ -1035,7 +1065,7 @@ def download_subtitles_only(
     if auto_subs:
         opts["writeautomaticsub"] = True
 
-    opts["subtitleslangs"] = parse_sub_langs(sub_langs)
+    apply_sub_langs(opts, sub_langs)
     # "srt" is (almost) never a native source format; pick the best native
     # track and let the convertor below produce the .srt file.
     opts["subtitlesformat"] = "best" if sub_format.lower() == "srt" else sub_format
