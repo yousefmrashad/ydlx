@@ -1529,6 +1529,10 @@ def run_interactive_menu() -> None:
     global session_cookies_browser, session_cookies_profile, session_cookies_file
     if session_cookies_browser is None:
         session_cookies_browser = get_saved_cookie_source()
+        # Only restore the profile alongside the browser it belongs to. Reading
+        # it unconditionally would reattach a saved path to a browser picked
+        # later in this session, or keep one after the user switches away.
+        session_cookies_profile = get_saved_cookie_profile()
     if session_cookies_file is None:
         session_cookies_file = get_saved_cookie_file()
     console = Console()

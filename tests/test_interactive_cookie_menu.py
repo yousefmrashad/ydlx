@@ -128,6 +128,39 @@ def test_saved_profile_keeps_its_path_out_of_the_prompt(
     assert str(profile) not in capsys.readouterr().out
 
 
+def test_a_saved_profile_is_restored_into_a_fresh_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new session must pick the profile back up, not just the browser name.
+
+    run_interactive_menu seeded session_cookies_browser from settings but left
+    session_cookies_profile at None, so a saved "firefox" + profile path was read
+    as a bare "firefox" until the user picked custom again.
+    """
+    profile = tmp_path / "zen" / "abc123.default"
+    profile.mkdir(parents=True)
+    save_settings({"cookies_from_browser": "firefox", "cookies_profile": str(profile)})
+    feed(monkeypatch, "7")
+
+    ydlx.run_interactive_menu()
+
+    assert ydlx.session_browser_spec() == ("firefox", str(profile))
+
+
+def test_switching_browser_drops_a_saved_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Restoring the profile must not reattach it to a browser picked later."""
+    profile = tmp_path / "abc123.default"
+    profile.mkdir(parents=True)
+    save_settings({"cookies_from_browser": "firefox", "cookies_profile": str(profile)})
+    feed(monkeypatch, "6", "browser", "brave", "7")
+
+    ydlx.run_interactive_menu()
+
+    assert ydlx.session_browser_spec() == ("brave",)
+
+
 def test_none_clears_a_previously_saved_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
