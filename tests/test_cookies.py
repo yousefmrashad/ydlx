@@ -499,7 +499,7 @@ def test_parse_cookie_file_rejects_missing_path(tmp_path: Path) -> None:
 
 
 def test_hint_explains_app_bound_encryption() -> None:
-    """The DPAPI failure users hit on Windows Edge/Chrome must be explained."""
+    """The DPAPI failure users hit on Windows Chromium must be explained."""
     hint = cookie_failure_hint(
         "ERROR: Failed to decrypt with DPAPI. See "
         "https://github.com/yt-dlp/yt-dlp/issues/10927 for more info"
@@ -508,6 +508,37 @@ def test_hint_explains_app_bound_encryption() -> None:
     assert "App-Bound Encryption" in hint
     assert "10927" in hint
     assert "--cookies" in hint
+
+
+def test_hint_does_not_claim_all_chromium_browsers_fail() -> None:
+    """Only v20-migrated cookies fail, so the hint must not forbid trying others.
+
+    Verified on Windows: brave/chrome/edge fail (all v20 cookies) while
+    vivaldi — also Chromium — still works because it stores v10 cookies.
+    """
+    hint = cookie_failure_hint("ERROR: Failed to decrypt with DPAPI")
+    assert hint is not None
+    lowered = hint.lower()
+    assert "firefox" in lowered
+    # Switching browser is a legitimate suggestion, so it must not be ruled out.
+    assert "switching browser may help" in lowered
+    assert "switching between them does not help" not in lowered
+
+
+def test_hint_explains_missing_browser_cookie_database() -> None:
+    """A browser yt-dlp cannot locate needs different advice than a decrypt failure."""
+    hint = cookie_failure_hint(
+        'could not find brave cookies database in "C:\\Users\\me\\AppData\\Local\\Brave"'
+    )
+    assert hint is not None
+    assert "not found" in hint
+    assert "firefox" in hint
+
+
+def test_hint_for_unsupported_platform_browser() -> None:
+    """safari on Windows raises 'unsupported platform', which is not cookie-specific."""
+    hint = cookie_failure_hint("unsupported platform: win32")
+    assert hint is None
 
 
 def test_hint_tells_user_to_close_the_browser() -> None:
@@ -539,6 +570,7 @@ def test_hint_for_generic_cookie_load_failure() -> None:
         "HTTP Error 404: Not Found",
         "Sign in to confirm you're not a bot",
         "Unable to download video subtitles",
+        "HTTP Error 403: Forbidden",
     ],
 )
 def test_hint_is_none_for_unrelated_errors(message: str) -> None:
@@ -560,14 +592,67 @@ def test_report_failure_shows_guidance_instead_of_raw_error(
     assert "Failed to decrypt with DPAPI" not in out
 
 
-def test_logger_does_not_reprint_cookie_errors(
+@pytest.mark.parametrize(
+    "message",
+    [
+        # A path or title mentioning the keyword is not a decryption failure.
+        "ERROR: unable to write C:\\out\\my DPAPI notes.mp4: disk full",
+        "ERROR: unable to open C:\\Users\\me\\app-bound\\notes.txt",
+        "ERROR: [youtube] abc: Video unavailable. Title: How to fix DPAPI errors",
+    ],
+)
+def test_hint_ignores_dpapi_mentions_without_decryption(message: str) -> None:
+    """The keyword alone must not hijack an unrelated error."""
+    assert cookie_failure_hint(message) is None
+
+
+def test_dpapi_hint_still_matches_the_real_error() -> None:
+    """Anchoring the match must not break the genuine case."""
+    assert cookie_failure_hint("Failed to decrypt with DPAPI") is not None
+    assert (
+        cookie_failure_hint("could not decrypt using App-Bound Encryption") is not None
+    )
+
+
+def test_logger_reports_the_raw_cookie_error(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The logger defers cookie failures to report_failure instead of echoing them."""
+    """The real error must survive; report_failure adds the hint separately.
+
+    Suppressing it here meant an unrelated error whose text merely contained a
+    keyword was replaced by cookie advice and the cause was lost entirely.
+    """
     ydlx.MyLogger(verbose=True).error(
         "ERROR: Failed to decrypt with DPAPI. See https://example.invalid for more info"
     )
-    assert capsys.readouterr().out == ""
+    assert "Failed to decrypt with DPAPI" in capsys.readouterr().out
+
+
+def test_logger_repeats_an_identical_error_only_once(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """yt-dlp reports some failures twice; the user should see one line.
+
+    Confirmed against the real cookiejar path, which calls report_error once
+    from trouble() and again from the cookiejar property with the chained cause.
+    """
+    logger = ydlx.MyLogger(verbose=True)
+    msg = "ERROR: Failed to decrypt with DPAPI. See https://example.invalid"
+    logger.error(msg)
+    logger.error(msg)
+    assert capsys.readouterr().out.count("Failed to decrypt with DPAPI") == 1
+
+
+def test_logger_still_distinguishes_different_errors(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Dedup must key on the message, not blanket-suppress later errors."""
+    logger = ydlx.MyLogger(verbose=True)
+    logger.error("ERROR: first failure")
+    logger.error("ERROR: second failure")
+    out = capsys.readouterr().out
+    assert "first failure" in out
+    assert "second failure" in out
 
 
 def test_logger_still_reports_other_errors(

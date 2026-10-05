@@ -113,11 +113,13 @@ class MyLogger:
     console: Console
     verbose: bool
     already_downloaded: list[str]
+    reported_errors: set[str]
 
     def __init__(self, verbose: bool = False):
         self.console = Console()
         self.verbose = verbose
         self.already_downloaded = []
+        self.reported_errors = set()
 
     def debug(self, msg: str) -> None:
         # yt-dlp outputs debug and info messages through debug()
@@ -138,12 +140,15 @@ class MyLogger:
         self.console.print(f"[yellow]⚠️  Warning: {strip_ansi(msg)}[/yellow]")
 
     def error(self, msg: str) -> None:
+        # Always report what yt-dlp actually said, so an unrelated error is never
+        # lost to a cookie hint. But yt-dlp reports some failures twice: once via
+        # the generic trouble() path and again from the cookiejar property with
+        # the chained cause. Print only the first occurrence of a given message,
+        # which keeps the error visible without echoing it.
         clean = collapse_error_prefixes(msg)
-        # Cookie failures are re-raised and reported once with actionable
-        # guidance by report_failure; echoing the raw text here as well is what
-        # produced the same yt-dlp error three times over.
-        if cookie_failure_hint(clean):
+        if clean in self.reported_errors:
             return
+        self.reported_errors.add(clean)
         self.console.print(f"[bold red]❌ Error: {clean}[/bold red]")
 
 
@@ -558,13 +563,32 @@ def cookie_failure_hint(message: str) -> str | None:
     full table of links.
     """
     lowered = message.lower()
-    if "dpapi" in lowered or "app-bound" in lowered:
+    # Require a decryption context alongside the keyword. A video title or a
+    # directory named "dpapi"/"app-bound" used to be enough to trigger this,
+    # which replaced an unrelated error with cookie advice.
+    if ("dpapi" in lowered or "app-bound" in lowered) and "decrypt" in lowered:
+        # Only cookies already migrated to the v20 App-Bound scheme fail: yt-dlp
+        # routes any non-v10 value through CryptUnprotectData, which the
+        # App-Bound service refuses. Whether a given Chromium browser is
+        # affected depends on its version, so a browser that still stores v10
+        # cookies (older or un-migrated installs) can still work.
         return (
-            "This browser encrypts cookies with App-Bound Encryption on Windows, "
-            "which yt-dlp cannot decrypt. Use --cookies-from-browser firefox, "
-            "brave, vivaldi, opera, or chromium, or export cookies.txt with a "
-            '"Get cookies.txt LOCALLY" extension and pass --cookies FILE '
+            "These cookies use App-Bound Encryption, which yt-dlp cannot "
+            "decrypt. Chromium browsers migrate their cookies to this scheme "
+            "over time, so switching browser may help if the other one still "
+            "uses the older format. The reliable options are "
+            "--cookies-from-browser firefox, or exporting cookies.txt with a "
+            '"Get cookies.txt LOCALLY" extension and passing --cookies FILE '
             f"(yt-dlp issue {DPAPI_ISSUE})."
+        )
+    if "could not find" in lowered and "cookies database" in lowered:
+        return (
+            "That browser's cookie database was not found. The browser may not "
+            "be installed, it may be a portable or non-default install, or the "
+            "cookie profile name may be wrong. A Firefox-based browser that "
+            "keeps its profiles elsewhere (Zen, LibreWolf, Waterfox) needs an "
+            "explicit path: --cookies-from-browser "
+            "firefox:/path/to/profiles/Default"
         )
     if "cookie database" in lowered and (
         "copy" in lowered or "permission" in lowered or "lock" in lowered
