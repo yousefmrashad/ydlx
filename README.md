@@ -132,6 +132,8 @@ ydlx subs "https://www.youtube.com/watch?v=..." --sub-langs en,es,ar
 ydlx subs "https://www.youtube.com/watch?v=..." --sub-format vtt
 ```
 
+Leaving `--sub-langs` at its default lets yt-dlp choose the track, and it prefers an official track over an automatic caption. Pinning a language is an exact match, which misses official tracks YouTube names with a suffix (`en-ehkg1hFWq8A`).
+
 ### 4. Extract Audio
 ```bash
 # Extract M4A audio to ~/Downloads/audio
@@ -157,7 +159,7 @@ ydlx info "https://www.youtube.com/watch?v=..." -o "./metadata"
 | Flag | Meaning |
 |---|---|
 | `-o` | Output directory |
-| `-b`, `--cookies-from-browser` | Extract cookies from browser (brave, chrome, chromium, edge, firefox, opera, safari, vivaldi, whale) |
+| `-b`, `--cookies-from-browser` | Extract cookies from browser (brave, chrome, chromium, edge, firefox, opera, safari, vivaldi, whale). Takes `BROWSER` or `BROWSER:<profile path>` |
 | `--cookies` | Path to a Netscape `cookies.txt` file |
 | `-l` | Comma-separated subtitle languages |
 | `-S` | Download subtitles as a separate file |
@@ -173,13 +175,21 @@ Cookie reads fail on some setups, and ydlx explains the common cases instead of 
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `Failed to decrypt with DPAPI` | Chrome/Edge encrypt cookies with App-Bound Encryption on Windows, which yt-dlp cannot decrypt ([yt-dlp#10927](https://github.com/yt-dlp/yt-dlp/issues/10927)) | Use `--cookies-from-browser firefox` (or brave, vivaldi, opera, chromium), or export a `cookies.txt` and pass `--cookies` |
+| `Failed to decrypt with DPAPI` | The browser migrated its cookies to App-Bound Encryption on Windows, which yt-dlp cannot decrypt ([yt-dlp#10927](https://github.com/yt-dlp/yt-dlp/issues/10927)) | Use `--cookies-from-browser firefox`, or export a `cookies.txt` and pass `--cookies` |
 | `Could not copy ... cookie database` | The browser holds a lock on its cookie DB ([yt-dlp#7271](https://github.com/yt-dlp/yt-dlp/issues/7271)) | Close the browser completely, then retry — a running browser also hides freshly written cookies |
 | `Cookies file must be Netscape formatted, not JSON` | A JSON cookie export was passed to `--cookies` | Export with a Netscape-format extension such as *Get cookies.txt LOCALLY* |
 
-On macOS and Linux all supported browsers work: App-Bound Encryption is Windows-only.
+On Windows this depends on whether that browser has migrated its cookie store to the `v20` App-Bound format: a migrated store cannot be read, while a browser still on `v10` works, so Vivaldi is Chromium too and still reads fine. **Firefox is the most reliable option anywhere.** On macOS and Linux all supported browsers work, since App-Bound Encryption is Windows-only.
 
 To create a `cookies.txt`, install the **Get cookies.txt LOCALLY** extension, log in to the site, and export from the extension. The file is plain tab-separated text, and ydlx validates the path up front because yt-dlp silently ignores a `cookies.txt` it cannot read.
+
+**Browser profiles.** yt-dlp only searches Mozilla's own profile directory, so a Firefox-based browser that keeps profiles elsewhere (Zen, LibreWolf, Waterfox) needs an explicit path:
+
+```bash
+ydlx download "https://youtu.be/..." -b "firefox:/home/me/.zen/profiles/abc123.default"
+```
+
+ydlx checks the browser name against the list above and rejects anything else, but **it does not guess which reader matches an unknown browser**: there is no reliable name-to-format mapping and forks vary. If your browser stores cookies like one of the listed ones, name that one and supply the path; otherwise use a `cookies.txt`. In the dashboard this appears as **custom** under *Set Cookie Source*.
 
 ---
 
