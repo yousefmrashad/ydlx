@@ -32,6 +32,7 @@ from rich.progress import (
 from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 from typer import Argument, Option, Typer
+from yt_dlp.cookies import CHROMIUM_BASED_BROWSERS
 from yt_dlp.utils import DownloadError
 
 app = Typer(
@@ -40,13 +41,18 @@ app = Typer(
     no_args_is_help=False,
 )
 
-# Global session variables for cookies in interactive mode
+# Global session variables for cookies in interactive mode. The browser and its
+# profile are kept apart, matching the tuple yt-dlp documents as its browser
+# spec; only the CLI flag and the settings file are text.
 session_cookies_browser: str | None = None
+session_cookies_profile: str | None = None
 session_cookies_file: str | None = None
 
-# Every browser whose cookie store yt-dlp knows how to read. Chrome and Edge
-# encrypt cookies with App-Bound Encryption on Windows, so extraction fails
-# there; the others still use keyring/DPAPI encryption yt-dlp can handle.
+# Every browser whose cookie store yt-dlp knows how to read. On Windows,
+# Chromium browsers that have migrated their cookies to the App-Bound (v20)
+# scheme cannot be read; whether a given install has migrated depends on its
+# version, so firefox stays the only choice that is reliable everywhere. The
+# rest are listed because they work on macOS, Linux, and older installs.
 SUPPORTED_BROWSERS: tuple[str, ...] = (
     "brave",
     "chrome",
@@ -62,8 +68,20 @@ SUPPORTED_BROWSERS: tuple[str, ...] = (
 BROWSER_OPTION_HELP = (
     "Extract cookies from browser ("
     + ", ".join(SUPPORTED_BROWSERS)
-    + "); chrome and edge cannot be read on Windows, prefer firefox or brave"
+    + "); on Windows, firefox is the most reliable, since Chromium browsers "
+    "may use App-Bound Encryption. Append ':<profile path>' to read a profile "
+    "yt-dlp does not search by default, e.g. firefox:C:/path/to/profile"
 )
+
+# Reader choices for the dashboard's custom profile flow. Once a profile path is
+# given, yt-dlp derives the install directory from that path (dirname of the
+# profile), so the browser name stops selecting where to look and only selects
+# the cookie reader. Verified on Windows: chrome:<path> and vivaldi:<path>
+# returned identical results against the same profile. So the family collapses
+# to one representative each rather than listing nine interchangeable names.
+GECKO_BROWSER = "firefox"
+CHROMIUM_BROWSER = "chrome"
+CUSTOM_BASE_CHOICES: tuple[str, ...] = (GECKO_BROWSER, CHROMIUM_BROWSER)
 COOKIE_FILE_OPTION_HELP = (
     'Path to a Netscape cookies.txt file (export it with a "Get cookies.txt '
     'LOCALLY" extension when your browser cannot be read directly)'
@@ -421,9 +439,80 @@ def get_saved_cookie_file() -> str | None:
     return str(value) if value else None
 
 
+def get_saved_cookie_profile() -> str | None:
+    """Returns the persisted cookie-source profile path or name, if any."""
+    value = load_settings().get("cookies_profile")
+    return str(value) if value else None
+
+
+def parse_cookies_from_browser(spec: str) -> tuple[str, ...]:
+    """
+    Splits "browser:profile" into the (browser, profile) pair yt-dlp expects.
+
+    yt-dlp's own CLI performs this split inside parseOpts, but ydlx calls the
+    API directly, so the colon form has to be unpacked at the command boundary.
+    Without it a Firefox-based browser that stores profiles outside the
+    standard folder (Zen,
+    LibreWolf, Waterfox, Floorp) is unreachable, because yt-dlp only searches
+    Mozilla's own profile directory.
+
+    Only the first colon separates, so Windows paths survive intact
+    ("firefox:C:\\Users\\me\\zen\\Profiles\\Default").
+    """
+    browser, separator, profile = spec.partition(":")
+    if not separator or not profile:
+        return (browser,)
+    return (browser, profile)
+
+
+def build_browser_spec(
+    browser: str | None, profile: str | None = None
+) -> tuple[str, ...] | None:
+    """
+    Builds the tuple that yt-dlp documents as its browser-spec form.
+
+    A separate profile is used as given. Without one the browser value is run
+    through parse_cookies_from_browser, so a settings file that carries the
+    colon form is still understood instead of being handed to yt-dlp whole and
+    rejected as an unknown browser name.
+    """
+    if not browser:
+        return None
+    if profile:
+        return (browser, profile)
+    return parse_cookies_from_browser(browser)
+
+
+def session_browser_spec() -> tuple[str, ...] | None:
+    """The dashboard's current browser source in yt-dlp's tuple form."""
+    return build_browser_spec(session_cookies_browser, session_cookies_profile)
+
+
+def format_cookie_source(browser: str | None, profile: str | None = None) -> str:
+    """
+    Renders the active browser source compactly for the dashboard.
+
+    The profile is a full path, far too wide for the menu panel, so only the
+    profile directory's name is kept ("firefox: Default (release)"). A profile
+    pointing straight at a cookies.sqlite keeps its parent directory instead.
+    """
+    if not browser:
+        return ""
+    if not profile:
+        return browser
+    path = Path(profile)
+    name = path.parent.name if path.suffix == ".sqlite" else path.name
+    return f"{browser}: {name or profile}"
+
+
+def format_cookie_file(path: str) -> str:
+    """Shows only the file name; a full path is too wide for the menu panel."""
+    return Path(path).name or path
+
+
 def apply_cookie_opts(
     ydl_opts: dict[str, Any],
-    cookies_from_browser: str | None = None,
+    browser_spec: tuple[str, ...] | None = None,
     cookie_file: str | None = None,
 ) -> None:
     """
@@ -435,15 +524,15 @@ def apply_cookie_opts(
     explicitly is honored, since yt-dlp merges cookiesfrombrowser with
     cookiefile and gives file entries precedence.
     """
-    if cookies_from_browser or cookie_file:
-        browser = cookies_from_browser or None
+    if browser_spec or cookie_file:
+        spec = browser_spec
         resolved_file = cookie_file or None
     else:
-        browser = get_saved_cookie_source()
+        spec = build_browser_spec(get_saved_cookie_source(), get_saved_cookie_profile())
         resolved_file = get_saved_cookie_file()
 
-    if browser:
-        ydl_opts["cookiesfrombrowser"] = (browser,)
+    if spec:
+        ydl_opts["cookiesfrombrowser"] = spec
     if resolved_file:
         ydl_opts["cookiefile"] = resolved_file
 
@@ -546,6 +635,100 @@ def parse_cli_url(url: str) -> str:
     return normalized
 
 
+def cookie_source_choice(browser: str | None, profile: str | None = None) -> str:
+    """
+    Maps the active source onto a value that exists in the menu's choice list.
+
+    A saved profile can never be one of the bare browser names the prompt
+    offers, so it maps to "custom"; otherwise the prompt would pre-fill with
+    something absent from its own options.
+    """
+    if not browser:
+        return "none"
+    return "custom" if profile else browser
+
+
+def cookie_browser_error(spec: str) -> str | None:
+    """
+    Returns why a --cookies-from-browser value cannot be used, or None if it can.
+
+    Only the browser name is checked, against the fixed list yt-dlp supports.
+    ydlx deliberately does not try to infer what kind of browser a name refers
+    to: there is no reliable mapping from browser name to cookie format, forks
+    are numerous and their bases differ, so any guess would produce
+    confidently incorrect advice. Naming the closest supported base is the
+    user's call, so the message lists what is supported and explains the
+    "name:profile" mechanism rather than guessing on their behalf.
+    """
+    browser, separator, _profile = spec.partition(":")
+    if not separator:
+        browser = spec
+    name = browser.strip()
+    if not name or name in SUPPORTED_BROWSERS:
+        return None
+    return (
+        f"'{name}' is not a browser yt-dlp can read. It supports: "
+        f"{', '.join(SUPPORTED_BROWSERS)}. If your browser stores cookies in the "
+        "same format as one of those, name that one and point at the profile "
+        "directly, e.g. --cookies-from-browser firefox:<path to profile>. "
+        "Otherwise export a cookies.txt and pass --cookies instead."
+    )
+
+
+def parse_browser_spec(spec: str) -> tuple[str, ...]:
+    """
+    Validates a --cookies-from-browser value and converts it to yt-dlp's tuple.
+
+    Validation happens here so an unsupported name is rejected with the way out
+    spelled out, rather than reaching yt-dlp as a bare
+    `unsupported browser: "..."`. Splitting the optional ":profile" suffix is
+    the same step, since this is the one place the flag is still text.
+    """
+    error = cookie_browser_error(spec)
+    if error:
+        Console().print(f"[bold red]❌ {error}[/bold red]")
+        raise typer.Exit(code=1)
+    return parse_cookies_from_browser(spec)
+
+
+def profile_arg_help(browser: str) -> str:
+    """
+    Describes what yt-dlp expects after the colon for a given base reader.
+
+    The two cookie layouts differ, so one instruction cannot fit both: Gecko
+    browsers are read by walking a profile folder for cookies.sqlite, while
+    Chromium browsers look for a file named "Cookies" (no extension) under a
+    profile folder, and accept a bare profile name such as "Default".
+    """
+    if browser in CHROMIUM_BASED_BROWSERS:
+        return "profile name (e.g. Default) or folder path"
+    return "profile folder path (the one containing cookies.sqlite)"
+
+
+def is_profile_path(raw: str) -> bool:
+    """
+    Whether a profile argument is a filesystem path rather than a bare name.
+
+    Chromium readers accept a profile name such as "Default" that resolves
+    under the browser's own directory, so a name must not be required to exist.
+    """
+    return (
+        os.sep in raw
+        or (os.altsep is not None and os.altsep in raw)
+        or Path(raw).is_absolute()
+    )
+
+
+def normalize_profile_arg(raw: str) -> str:
+    """
+    Cleans up a profile path, leaving a bare Chromium profile name untouched.
+
+    Only a path is expanded, so "~" works; anything without a separator is a
+    name that yt-dlp resolves itself and is returned as typed.
+    """
+    return str(Path(os.path.expanduser(raw))) if is_profile_path(raw) else raw
+
+
 def parse_cookie_file(cookie_file: str) -> str:
     """
     Validates a --cookies argument, exiting with an error when it is unusable.
@@ -583,7 +766,7 @@ def prompt_for_url(console: Console) -> str:
 
 def get_video_info(
     url: str,
-    cookies_from_browser: str | None = None,
+    browser_spec: tuple[str, ...] | None = None,
     cookie_file: str | None = None,
     verbose: bool = False,
 ) -> dict[str, Any]:
@@ -594,7 +777,7 @@ def get_video_info(
         "color": "never",
         "remote_components": ["ejs:github"],
     }
-    apply_cookie_opts(ydl_opts, cookies_from_browser, cookie_file)
+    apply_cookie_opts(ydl_opts, browser_spec, cookie_file)
 
     with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -604,7 +787,7 @@ def get_video_info(
 def download_video(
     url: str,
     opts_override: dict[str, Any] | None = None,
-    cookies_from_browser: str | None = None,
+    browser_spec: tuple[str, ...] | None = None,
     cookie_file: str | None = None,
     output_dir: str | Path | None = None,
     verbose: bool = False,
@@ -628,7 +811,7 @@ def download_video(
         "remote_components": ["ejs:github"],
     }
 
-    apply_cookie_opts(ydl_opts, cookies_from_browser, cookie_file)
+    apply_cookie_opts(ydl_opts, browser_spec, cookie_file)
 
     if opts_override:
         ydl_opts.update(opts_override)
@@ -673,7 +856,7 @@ def download_video(
 def download_audio(
     url: str,
     format_codec: str = "m4a",
-    cookies_from_browser: str | None = None,
+    browser_spec: tuple[str, ...] | None = None,
     cookie_file: str | None = None,
     output_dir: str | Path | None = None,
     opts_override: dict[str, Any] | None = None,
@@ -700,7 +883,7 @@ def download_audio(
     return download_video(
         url,
         opts_override=opts,
-        cookies_from_browser=cookies_from_browser,
+        browser_spec=browser_spec,
         cookie_file=cookie_file,
         output_dir=target_dir,
         verbose=verbose,
@@ -710,7 +893,7 @@ def download_audio(
 def download_from_info_json(
     info_file: str,
     opts_override: dict[str, Any] | None = None,
-    cookies_from_browser: str | None = None,
+    browser_spec: tuple[str, ...] | None = None,
     cookie_file: str | None = None,
     output_dir: str | Path | None = None,
     verbose: bool = False,
@@ -728,7 +911,7 @@ def download_from_info_json(
         "color": "never",
     }
 
-    apply_cookie_opts(ydl_opts, cookies_from_browser, cookie_file)
+    apply_cookie_opts(ydl_opts, browser_spec, cookie_file)
 
     if opts_override:
         ydl_opts.update(opts_override)
@@ -755,6 +938,11 @@ def download_from_info_json(
     return code
 
 
+def parse_sub_langs(sub_langs: str) -> list[str]:
+    """Splits the comma-separated --sub-langs value, defaulting to English."""
+    return [lang.strip() for lang in sub_langs.split(",") if lang.strip()] or ["en"]
+
+
 def configure_subtitles(
     opts: dict[str, Any],
     *,
@@ -772,8 +960,7 @@ def configure_subtitles(
     if auto_subs:
         opts["writeautomaticsub"] = True
 
-    langs = [lang.strip() for lang in sub_langs.split(",") if lang.strip()]
-    opts["subtitleslangs"] = langs if langs else ["en"]
+    opts["subtitleslangs"] = parse_sub_langs(sub_langs)
 
     # "srt" is (almost) never a native source format; pick the best native
     # track and let the convertor below produce the .srt file.
@@ -808,7 +995,7 @@ def download_subtitles_only(
     sub_langs: str = "en",
     auto_subs: bool = True,
     sub_format: str = "srt",
-    cookies_from_browser: str | None = None,
+    browser_spec: tuple[str, ...] | None = None,
     cookie_file: str | None = None,
     output_dir: str | Path | None = None,
     verbose: bool = False,
@@ -824,8 +1011,7 @@ def download_subtitles_only(
     if auto_subs:
         opts["writeautomaticsub"] = True
 
-    langs = [lang.strip() for lang in sub_langs.split(",") if lang.strip()]
-    opts["subtitleslangs"] = langs if langs else ["en"]
+    opts["subtitleslangs"] = parse_sub_langs(sub_langs)
     # "srt" is (almost) never a native source format; pick the best native
     # track and let the convertor below produce the .srt file.
     opts["subtitlesformat"] = "best" if sub_format.lower() == "srt" else sub_format
@@ -851,7 +1037,7 @@ def download_subtitles_only(
     return download_video(
         url,
         opts_override=opts,
-        cookies_from_browser=cookies_from_browser,
+        browser_spec=browser_spec,
         cookie_file=cookie_file,
         output_dir=target_dir,
         verbose=verbose,
@@ -866,7 +1052,7 @@ def report_subtitle_download(
     langs: str,
     auto_subs: bool,
     sub_format: str,
-    cookies_from_browser: str | None,
+    browser_spec: tuple[str, ...] | None,
     cookie_file: str | None = None,
     verbose: bool = False,
 ) -> int:
@@ -877,7 +1063,7 @@ def report_subtitle_download(
         sub_langs=langs,
         auto_subs=auto_subs,
         sub_format=sub_format,
-        cookies_from_browser=cookies_from_browser,
+        browser_spec=browser_spec,
         cookie_file=cookie_file,
         output_dir=target_dir,
         verbose=verbose,
@@ -1108,7 +1294,7 @@ def do_download_interactive(
             try:
                 info = get_video_info(
                     url,
-                    cookies_from_browser=session_cookies_browser,
+                    browser_spec=session_browser_spec(),
                     cookie_file=session_cookies_file,
                 )
             except Exception as e:
@@ -1274,7 +1460,7 @@ def do_download_interactive(
     error_code = download_video(
         url,
         opts_override=opts,
-        cookies_from_browser=session_cookies_browser,
+        browser_spec=session_browser_spec(),
         cookie_file=session_cookies_file,
         output_dir=target_dir,
     )
@@ -1286,7 +1472,7 @@ def do_download_interactive(
 
 def run_interactive_menu() -> None:
     """Runs the main CLI prompt-driven dashboard loop."""
-    global session_cookies_browser, session_cookies_file
+    global session_cookies_browser, session_cookies_profile, session_cookies_file
     if session_cookies_browser is None:
         session_cookies_browser = get_saved_cookie_source()
     if session_cookies_file is None:
@@ -1294,10 +1480,21 @@ def run_interactive_menu() -> None:
     console = Console()
     while True:
         active_cookies = [
-            part for part in (session_cookies_browser, session_cookies_file) if part
+            label
+            for label in (
+                format_cookie_source(session_cookies_browser, session_cookies_profile)
+                if session_cookies_browser
+                else None,
+                format_cookie_file(session_cookies_file)
+                if session_cookies_file
+                else None,
+            )
+            if label
         ]
         cookies_status = (
-            " [bold green]+[/bold green] ".join(active_cookies)
+            " [bold green]+[/bold green] ".join(
+                f"[bold green]{label}[/bold green]" for label in active_cookies
+            )
             if active_cookies
             else "[yellow]None[/yellow]"
         )
@@ -1353,7 +1550,7 @@ def run_interactive_menu() -> None:
                 try:
                     info = get_video_info(
                         url,
-                        cookies_from_browser=session_cookies_browser,
+                        browser_spec=session_browser_spec(),
                         cookie_file=session_cookies_file,
                     )
                 except Exception as e:
@@ -1410,7 +1607,7 @@ def run_interactive_menu() -> None:
                     langs=sub_langs,
                     auto_subs=auto_subs,
                     sub_format=sub_format,
-                    cookies_from_browser=session_cookies_browser,
+                    browser_spec=session_browser_spec(),
                     cookie_file=session_cookies_file,
                 )
             elif sub_choice == "4":
@@ -1430,7 +1627,7 @@ def run_interactive_menu() -> None:
                 _ = download_audio(
                     url,
                     codec,
-                    cookies_from_browser=session_cookies_browser,
+                    browser_spec=session_browser_spec(),
                     cookie_file=session_cookies_file,
                     output_dir=music_dir,
                     sponsorblock=skip_sponsors,
@@ -1458,7 +1655,7 @@ def run_interactive_menu() -> None:
             _ = download_audio(
                 url,
                 codec,
-                cookies_from_browser=session_cookies_browser,
+                browser_spec=session_browser_spec(),
                 cookie_file=session_cookies_file,
                 output_dir=music_dir,
                 sponsorblock=skip_sponsors,
@@ -1488,7 +1685,7 @@ def run_interactive_menu() -> None:
                 langs=sub_langs,
                 auto_subs=auto_subs,
                 sub_format=sub_format,
-                cookies_from_browser=session_cookies_browser,
+                browser_spec=session_browser_spec(),
                 cookie_file=session_cookies_file,
             )
 
@@ -1503,7 +1700,7 @@ def run_interactive_menu() -> None:
             )
             _ = download_from_info_json(
                 info_file,
-                cookies_from_browser=session_cookies_browser,
+                browser_spec=session_browser_spec(),
                 cookie_file=session_cookies_file,
                 output_dir=video_dir,
             )
@@ -1516,27 +1713,84 @@ def run_interactive_menu() -> None:
             )
             if source == "none":
                 session_cookies_browser = None
+                session_cookies_profile = None
                 session_cookies_file = None
-                save_settings({"cookies_from_browser": None, "cookiefile": None})
+                save_settings(
+                    {
+                        "cookies_from_browser": None,
+                        "cookies_profile": None,
+                        "cookiefile": None,
+                    }
+                )
                 console.print("[bold green]✓ Cookies disabled (persisted)[/bold green]")
             elif source == "browser":
                 console.print(
-                    "[dim]chrome and edge encrypt cookies with App-Bound Encryption "
-                    "on Windows and cannot be read; prefer firefox, brave, vivaldi, "
-                    "opera, or chromium.[/dim]"
+                    "[dim]On Windows, Chromium browsers may encrypt cookies with "
+                    "App-Bound Encryption, which yt-dlp cannot read — this affects "
+                    "recent chrome, edge, and brave installs. Firefox is the most "
+                    "reliable, or use a cookies.txt file.[/dim]"
                 )
                 browser = Prompt.ask(
                     "Select browser to load cookies from (helps avoid 403 Forbidden errors)",
-                    choices=["none", *SUPPORTED_BROWSERS],
-                    default=session_cookies_browser or "none",
+                    choices=["none", *SUPPORTED_BROWSERS, "custom"],
+                    default=cookie_source_choice(
+                        session_cookies_browser, session_cookies_profile
+                    ),
                 )
-                session_cookies_browser = None if browser == "none" else browser
+                if browser == "custom":
+                    # The base name is chosen explicitly rather than inferred:
+                    # ydlx cannot know which yt-dlp reader matches an unknown
+                    # browser, and guessing would give wrong advice.
+                    console.print(
+                        "[dim]Pick the cookie reader that matches your browser. "
+                        "'firefox' reads any Firefox-family profile "
+                        "(cookies.sqlite); 'chrome' reads any Chromium-family "
+                        "profile (brave, edge, opera, vivaldi and others all use "
+                        "the same reader once a path is given).[/dim]"
+                    )
+                    base = Prompt.ask(
+                        "Cookie reader to use",
+                        choices=list(CUSTOM_BASE_CHOICES),
+                        default=(
+                            session_cookies_browser
+                            if session_cookies_browser in CUSTOM_BASE_CHOICES
+                            else GECKO_BROWSER
+                        ),
+                    )
+                    # No fallback default: the home directory is never a browser
+                    # profile, and pre-filling it invited a path that cannot work.
+                    raw_profile = Prompt.ask(
+                        f"{base} {profile_arg_help(base)}",
+                        default=session_cookies_profile or "",
+                    ).strip()
+                    if not raw_profile:
+                        console.print(
+                            "[bold red]❌ No profile given. Re-run and pick 'none' "
+                            "to clear cookies.[/bold red]"
+                        )
+                        continue
+                    profile = normalize_profile_arg(raw_profile)
+                    # A bare Chromium profile name ("Default") is not a folder, so
+                    # it is passed through; anything that is a path must exist.
+                    if is_profile_path(raw_profile) and not Path(profile).is_dir():
+                        console.print(
+                            f"[bold red]❌ Not a folder: {profile}[/bold red]"
+                        )
+                        continue
+                    # Held separately, as yt-dlp's tuple documents it; never
+                    # rejoined into a colon string.
+                    session_cookies_browser = base
+                    session_cookies_profile = profile
+                else:
+                    session_cookies_browser = None if browser == "none" else browser
+                    session_cookies_profile = None
                 # Switching source kinds: clear the other one so the active
                 # source shown in the menu stays unambiguous.
                 session_cookies_file = None
                 save_settings(
                     {
                         "cookies_from_browser": session_cookies_browser,
+                        "cookies_profile": session_cookies_profile,
                         "cookiefile": None,
                     }
                 )
@@ -1562,8 +1816,13 @@ def run_interactive_menu() -> None:
                     continue
                 session_cookies_file = str(cookie_path)
                 session_cookies_browser = None
+                session_cookies_profile = None
                 save_settings(
-                    {"cookies_from_browser": None, "cookiefile": session_cookies_file}
+                    {
+                        "cookies_from_browser": None,
+                        "cookies_profile": None,
+                        "cookiefile": session_cookies_file,
+                    }
                 )
                 console.print(
                     f"[bold green]✓ Cookies file set to: {session_cookies_file} (persisted)[/bold green]"
@@ -1628,11 +1887,15 @@ def info(
     url = parse_cli_url(url)
     if cookies:
         cookies = parse_cookie_file(cookies)
+    # The flag is text; yt-dlp wants a tuple. Parse once, here at the boundary.
+    browser_spec = (
+        parse_browser_spec(cookies_from_browser) if cookies_from_browser else None
+    )
     with console.status("[bold blue]Fetching video metadata...[/bold blue]"):
         try:
             video_info = get_video_info(
                 url,
-                cookies_from_browser=cookies_from_browser,
+                browser_spec=browser_spec,
                 cookie_file=cookies,
                 verbose=verbose,
             )
@@ -1797,6 +2060,10 @@ def download(
         url = parse_cli_url(url)
     if cookies:
         cookies = parse_cookie_file(cookies)
+    # The flag is text; yt-dlp wants a tuple. Parse once, here at the boundary.
+    browser_spec = (
+        parse_browser_spec(cookies_from_browser) if cookies_from_browser else None
+    )
 
     target_dir: Path = Path(output_dir) if output_dir else get_default_video_dir()
 
@@ -1841,7 +2108,7 @@ def download(
         error_code = download_from_info_json(
             info_json,
             opts_override=opts,
-            cookies_from_browser=cookies_from_browser,
+            browser_spec=browser_spec,
             cookie_file=cookies,
             output_dir=target_dir,
             verbose=verbose,
@@ -1856,7 +2123,7 @@ def download(
         error_code = download_video(
             url,
             opts_override=opts,
-            cookies_from_browser=cookies_from_browser,
+            browser_spec=browser_spec,
             cookie_file=cookies,
             output_dir=target_dir,
             verbose=verbose,
@@ -1935,6 +2202,10 @@ def audio(
     url = parse_cli_url(url)
     if cookies:
         cookies = parse_cookie_file(cookies)
+    # The flag is text; yt-dlp wants a tuple. Parse once, here at the boundary.
+    browser_spec = (
+        parse_browser_spec(cookies_from_browser) if cookies_from_browser else None
+    )
     target_dir = Path(output_dir) if output_dir else get_default_music_dir()
     console.print(
         f"[blue]Extracting audio ({codec}) to [cyan]{target_dir}[/cyan] from: [cyan]{url}[/cyan][/blue]"
@@ -1953,7 +2224,7 @@ def audio(
     error_code = download_audio(
         url,
         format_codec=codec,
-        cookies_from_browser=cookies_from_browser,
+        browser_spec=browser_spec,
         cookie_file=cookies,
         output_dir=target_dir,
         opts_override=opts if opts else None,
@@ -2018,6 +2289,10 @@ def subs(
     url = parse_cli_url(url)
     if cookies:
         cookies = parse_cookie_file(cookies)
+    # The flag is text; yt-dlp wants a tuple. Parse once, here at the boundary.
+    browser_spec = (
+        parse_browser_spec(cookies_from_browser) if cookies_from_browser else None
+    )
     target_dir = Path(output_dir) if output_dir else get_default_video_dir()
     console.print(
         f"[blue]Downloading subtitles ({sub_langs}, {sub_format}) to [cyan]{target_dir}[/cyan] from: [cyan]{url}[/cyan][/blue]"
@@ -2029,7 +2304,7 @@ def subs(
         langs=sub_langs,
         auto_subs=auto_subs,
         sub_format=sub_format,
-        cookies_from_browser=cookies_from_browser,
+        browser_spec=browser_spec,
         cookie_file=cookies,
         verbose=verbose,
     )

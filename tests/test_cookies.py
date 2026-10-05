@@ -1,6 +1,7 @@
 """Tests for cookie sources: browser, cookies.txt files, and failure guidance."""
 
 import json
+import sys
 from http.cookiejar import LoadError
 from pathlib import Path
 from typing import Any, cast
@@ -8,16 +9,28 @@ from typing import Any, cast
 import pytest
 import typer
 import yt_dlp
-from yt_dlp.cookies import YoutubeDLCookieJar
+from yt_dlp.cookies import CHROMIUM_BASED_BROWSERS, YoutubeDLCookieJar
 from yt_dlp.utils import DownloadError
 
 import ydlx
 from ydlx import (
+    CHROMIUM_BROWSER,
+    CUSTOM_BASE_CHOICES,
+    GECKO_BROWSER,
     SUPPORTED_BROWSERS,
     apply_cookie_opts,
+    cookie_browser_error,
     cookie_failure_hint,
+    cookie_source_choice,
+    format_cookie_file,
+    format_cookie_source,
     get_saved_cookie_file,
+    is_profile_path,
+    normalize_profile_arg,
+    parse_browser_spec,
     parse_cookie_file,
+    parse_cookies_from_browser,
+    profile_arg_help,
     save_settings,
 )
 
@@ -53,7 +66,7 @@ def test_supported_browsers_matches_yt_dlp() -> None:
 
 def test_apply_cookie_opts_sets_both_sources() -> None:
     ydl_opts: dict[str, Any] = {}
-    apply_cookie_opts(ydl_opts, "firefox", str(Path("cookies.txt")))
+    apply_cookie_opts(ydl_opts, ("firefox",), str(Path("cookies.txt")))
     assert ydl_opts["cookiesfrombrowser"] == ("firefox",)
     assert ydl_opts["cookiefile"] == str(Path("cookies.txt"))
 
@@ -77,7 +90,7 @@ def test_explicit_browser_discards_saved_cookie_file() -> None:
     """`-b firefox` must not silently merge in a previously saved cookies.txt."""
     save_settings({"cookies_from_browser": "brave", "cookiefile": "/tmp/saved.txt"})
     ydl_opts: dict[str, Any] = {}
-    apply_cookie_opts(ydl_opts, "firefox")
+    apply_cookie_opts(ydl_opts, ("firefox",))
     assert ydl_opts["cookiesfrombrowser"] == ("firefox",)
     assert "cookiefile" not in ydl_opts
 
@@ -94,7 +107,7 @@ def test_explicit_both_sources_are_kept() -> None:
     """Layering a file over browser cookies remains possible when asked for."""
     save_settings({"cookies_from_browser": "brave"})
     ydl_opts: dict[str, Any] = {}
-    apply_cookie_opts(ydl_opts, "firefox", "/tmp/flag.txt")
+    apply_cookie_opts(ydl_opts, ("firefox",), "/tmp/flag.txt")
     assert ydl_opts["cookiesfrombrowser"] == ("firefox",)
     assert ydl_opts["cookiefile"] == "/tmp/flag.txt"
 
@@ -103,7 +116,7 @@ def test_apply_cookie_opts_empty_string_falls_through() -> None:
     """An empty string is not an explicit choice; it uses the saved source."""
     save_settings({"cookiefile": "/tmp/saved.txt"})
     ydl_opts: dict[str, Any] = {}
-    apply_cookie_opts(ydl_opts, "", "")
+    apply_cookie_opts(ydl_opts, None, "")
     assert ydl_opts["cookiefile"] == "/tmp/saved.txt"
 
 
@@ -116,6 +129,255 @@ def test_cookiefile_survives_settings_round_trip() -> None:
     assert get_saved_cookie_file() == "/tmp/cookies.txt"
     save_settings({"cookiefile": None})
     assert get_saved_cookie_file() is None
+
+
+# --- browser:profile spec ------------------------------------------------
+# yt-dlp only searches Mozilla's own profile directory on Windows, so a
+# Firefox-based browser that keeps profiles elsewhere (Zen, LibreWolf, Waterfox)
+# is unreachable without an explicit path. yt-dlp's CLI splits the colon form in
+# its option parser; ydlx calls the API directly, so it must split it itself.
+
+
+def test_parse_cookies_from_browser_plain_name() -> None:
+    assert parse_cookies_from_browser("firefox") == ("firefox",)
+
+
+def test_parse_cookies_from_browser_splits_profile() -> None:
+    assert parse_cookies_from_browser("firefox:default") == ("firefox", "default")
+
+
+def test_parse_cookies_from_browser_keeps_windows_path_intact() -> None:
+    """Only the first colon separates, so C:\\... survives."""
+    spec = r"firefox:C:\Users\me\AppData\Roaming\zen\Profiles\Default (release)"
+    assert parse_cookies_from_browser(spec) == (
+        "firefox",
+        r"C:\Users\me\AppData\Roaming\zen\Profiles\Default (release)",
+    )
+
+
+def test_parse_cookies_from_browser_trailing_colon_is_ignored() -> None:
+    assert parse_cookies_from_browser("firefox:") == ("firefox",)
+
+
+def test_apply_cookie_opts_passes_profile_to_ydl() -> None:
+    ydl_opts: dict[str, Any] = {}
+    apply_cookie_opts(
+        ydl_opts, ("firefox", r"C:\Users\me\zen\Profiles\Default (release)")
+    )
+    assert ydl_opts["cookiesfrombrowser"] == (
+        "firefox",
+        r"C:\Users\me\zen\Profiles\Default (release)",
+    )
+
+
+def test_apply_cookie_opts_reads_profile_from_saved_settings() -> None:
+    """The saved browser and profile are combined into the tuple yt-dlp wants."""
+    save_settings(
+        {"cookies_from_browser": "firefox", "cookies_profile": "/home/me/.zen/Default"}
+    )
+    ydl_opts: dict[str, Any] = {}
+    apply_cookie_opts(ydl_opts)
+    assert ydl_opts["cookiesfrombrowser"] == ("firefox", "/home/me/.zen/Default")
+
+
+def test_apply_cookie_opts_survives_a_saved_colon_form() -> None:
+    """A hand-edited or pre-tuple settings file must not be handed over whole."""
+    save_settings({"cookies_from_browser": "firefox:/home/me/.zen/Default"})
+    ydl_opts: dict[str, Any] = {}
+    apply_cookie_opts(ydl_opts)
+    assert ydl_opts["cookiesfrombrowser"] == ("firefox", "/home/me/.zen/Default")
+
+
+# --- Dashboard indicator formatting -------------------------------------
+
+
+def test_format_cookie_source_plain_browser() -> None:
+    assert format_cookie_source("firefox") == "firefox"
+
+
+def test_format_cookie_source_shortens_profile_path(tmp_path: Path) -> None:
+    """The indicator must not dump a whole path into the menu panel."""
+    profile = tmp_path / "zen" / "Profiles" / "bi1m31bh.Default (release)"
+    label = format_cookie_source("firefox", str(profile))
+    assert label == "firefox: bi1m31bh.Default (release)"
+    assert len(label) < 45
+
+
+def test_format_cookie_source_uses_parent_of_sqlite_path(tmp_path: Path) -> None:
+    sqlite = tmp_path / "zen" / "Profiles" / "abc.default" / "cookies.sqlite"
+    assert format_cookie_source("firefox", str(sqlite)) == "firefox: abc.default"
+
+
+def test_format_cookie_source_is_empty_without_a_browser() -> None:
+    assert format_cookie_source(None) == ""
+
+
+def test_format_cookie_file_keeps_drive_letter_intact(tmp_path: Path) -> None:
+    """A cookies.txt path must never be colon-split; "C:" is not a browser."""
+    assert format_cookie_file(str(tmp_path / "mycookies.txt")) == "mycookies.txt"
+    assert format_cookie_file("/home/me/cookies.txt") == "cookies.txt"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows drive letters only")
+def test_format_cookie_file_handles_a_windows_path() -> None:
+    assert format_cookie_file(r"C:\tmp\mycookies.txt") == "mycookies.txt"
+
+
+# --- Browser name validation ---------------------------------------------
+# ydlx checks only the name, against the list yt-dlp supports. It never infers
+# which reader matches an unknown browser: there is no reliable name-to-format
+# mapping, so guessing would produce confidently incorrect advice.
+
+
+@pytest.mark.parametrize("browser", SUPPORTED_BROWSERS)
+def test_supported_browser_names_are_accepted(browser: str) -> None:
+    assert cookie_browser_error(browser) is None
+
+
+def test_supported_name_with_profile_is_accepted() -> None:
+    assert cookie_browser_error(r"firefox:C:\me\profile") is None
+
+
+def test_unknown_browser_name_is_rejected() -> None:
+    error = cookie_browser_error("zen")
+    assert error is not None
+    assert "'zen' is not a browser yt-dlp can read" in error
+
+
+def test_unknown_name_error_lists_supported_browsers() -> None:
+    error = cookie_browser_error("librewolf") or ""
+    for browser in SUPPORTED_BROWSERS:
+        assert browser in error
+
+
+def test_unknown_name_error_explains_profile_mechanism() -> None:
+    error = cookie_browser_error("zen") or ""
+    assert "firefox:<path to profile>" in error
+    assert "--cookies" in error
+
+
+def test_unknown_name_error_makes_no_engine_claim() -> None:
+    """The message must not assert what kind of browser the name refers to.
+
+    Inventing that mapping is how this produced wrong advice before.
+    """
+    error = (cookie_browser_error("zen") or "").lower()
+    for claim in ("firefox-based", "is based on", "chromium-based", "is a fork of"):
+        assert claim not in error
+
+
+def test_unknown_name_before_colon_is_rejected() -> None:
+    assert cookie_browser_error(r"zen:C:\me\profile") is not None
+
+
+def test_empty_spec_is_left_to_yt_dlp() -> None:
+    assert cookie_browser_error("") is None
+
+
+def test_parse_browser_spec_exits_on_unknown_name() -> None:
+    with pytest.raises(typer.Exit) as excinfo:
+        parse_browser_spec("zen")
+    assert excinfo.value.exit_code == 1
+
+
+def test_parse_browser_spec_returns_the_tuple() -> None:
+    """The flag is text; this is the one boundary that converts it."""
+    assert parse_browser_spec(r"firefox:C:\me\p") == ("firefox", r"C:\me\p")
+    assert parse_browser_spec("firefox") == ("firefox",)
+
+
+# --- Menu default mapping -------------------------------------------------
+
+
+def test_choice_is_none_when_unset() -> None:
+    assert cookie_source_choice(None) == "none"
+
+
+def test_choice_is_the_browser_name_when_bare() -> None:
+    assert cookie_source_choice("firefox") == "firefox"
+
+
+def test_choice_is_custom_when_a_profile_is_present() -> None:
+    """A profile can never be one of the bare names in the choice list."""
+    assert cookie_source_choice("firefox", r"C:\me\p") == "custom"
+
+
+# --- Custom profile reader -----------------------------------------------
+# Once a profile path is supplied, yt-dlp derives the install directory from
+# it, so the browser name only selects the cookie reader. Verified on Windows:
+# chrome:<path> and vivaldi:<path> gave identical results for the same profile.
+
+
+def test_custom_base_choices_collapse_the_families() -> None:
+    assert CUSTOM_BASE_CHOICES == ("firefox", "chrome")
+
+
+@pytest.mark.parametrize("browser", CHROMIUM_BASED_BROWSERS)
+def test_every_chromium_browser_reads_identically(browser: str) -> None:
+    """The families are interchangeable, which is why only one is offered."""
+    assert browser not in CUSTOM_BASE_CHOICES or browser == CHROMIUM_BROWSER
+
+
+def test_gecko_browser_is_offered() -> None:
+    assert GECKO_BROWSER in CUSTOM_BASE_CHOICES
+
+
+def test_flag_still_accepts_every_supported_browser() -> None:
+    """The -b flag keeps all names: without a path the name finds the install."""
+    for browser in SUPPORTED_BROWSERS:
+        assert cookie_browser_error(browser) is None
+
+
+def test_profile_help_distinguishes_the_two_layouts() -> None:
+    gecko = profile_arg_help(GECKO_BROWSER)
+    chromium = profile_arg_help(CHROMIUM_BROWSER)
+    assert "cookies.sqlite" in gecko
+    assert "cookies.sqlite" not in chromium
+    assert "Default" in chromium
+
+
+def test_normalize_profile_arg_expands_home_in_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # expanduser reads HOME/USERPROFILE, not Path.home(), so both must be set.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    assert normalize_profile_arg("~/zen/Default") == str(tmp_path / "zen" / "Default")
+
+
+def test_normalize_profile_arg_keeps_bare_profile_names() -> None:
+    """A Chromium profile name is not a folder and must survive untouched."""
+    assert normalize_profile_arg("Default") == "Default"
+    assert normalize_profile_arg("Profile 1") == "Profile 1"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["Default", "Profile 1", "default-release"],
+)
+def test_bare_profile_names_are_not_treated_as_paths(raw: str) -> None:
+    assert is_profile_path(raw) is False
+
+
+@pytest.mark.parametrize("prefix", ["me", "home/me"])
+def test_a_relative_path_is_recognised(prefix: str) -> None:
+    assert is_profile_path(f"{prefix}/p") is True
+
+
+def test_a_tilde_path_is_recognised() -> None:
+    """The "~" form expands, so it must be recognised as a path."""
+    assert is_profile_path("~/me/p") is True
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows drive letters only")
+@pytest.mark.parametrize("raw", [r"C:\me\p", "C:/me/p"])
+def test_a_windows_path_is_recognised(raw: str) -> None:
+    assert is_profile_path(raw) is True
+
+
+def test_absolute_path_is_a_path_even_without_a_separator() -> None:
+    """A bare name is only ever relative; a drive or root means a real path."""
+    assert is_profile_path(Path.cwd().anchor) is True
 
 
 # --- Flag precedence -----------------------------------------------------
