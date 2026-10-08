@@ -552,6 +552,13 @@ def apply_cookie_opts(
 DPAPI_ISSUE = 10927
 COOKIE_LOCK_ISSUE = 7271
 
+# Why a skip happened and how to force a real download. The symptom is otherwise
+# baffling: request 1080p, receive the 720p already in the directory, exit 0.
+ALREADY_DOWNLOADED_HINT = (
+    "yt-dlp skips files matched by name, even if the requested format differs. "
+    "Delete the file(s) or pick another output directory to force a redownload."
+)
+
 
 def cookie_failure_hint(message: str) -> str | None:
     """
@@ -625,6 +632,26 @@ def report_failure(message: str, console: Console, prefix: str = "Error") -> Non
         console.print(f"[yellow]💡 {hint}[/yellow]")
         return
     console.print(f"[bold red]❌ {prefix}: {clean}[/bold red]")
+
+
+def report_already_downloaded(logger: MyLogger, console: Console) -> None:
+    """
+    Warns about the files yt-dlp skipped because the target name already existed.
+
+    Nothing else surfaces these: yt-dlp reports them through the debug channel,
+    which info() drops unless -v, and it counts the skip as success, so the run
+    would otherwise end on a green tick having fetched nothing. Each skipped file
+    is listed, because on a playlist that is the only way to tell which ones.
+
+    Duplicates are collapsed: the subtitle-retry path reuses the same logger, so
+    the second attempt appends the files the first one already skipped.
+    """
+    skipped = list(dict.fromkeys(logger.already_downloaded))
+    if not skipped:
+        return
+    for line in skipped:
+        console.print(f"[yellow]⚠️  {line}[/yellow]")
+    console.print(f"[yellow]⚠️  {ALREADY_DOWNLOADED_HINT}[/yellow]")
 
 
 # =====================================================================
@@ -905,22 +932,18 @@ def download_video(
             }
             retry_opts["progress_hooks"] = [DownloadTracker().hook]
             with yt_dlp.YoutubeDL(cast(Any, retry_opts)) as ydl:
-                return int(ydl.download([url]))
+                code = int(ydl.download([url]))
+            # retry_opts reuses the original logger, so anything the first
+            # attempt collected is in the list too; reporting dedupes.
+            report_already_downloaded(ydl_opts["logger"], Console())
+            return code
         report_failure(msg, Console(), "Download error")
         return 1
     except Exception as e:
         report_failure(str(e), Console(), "Download error")
         return 1
 
-    if ydl_opts["logger"].already_downloaded:
-        console = Console()
-        for line in ydl_opts["logger"].already_downloaded:
-            console.print(f"[yellow]⚠️  {line}[/yellow]")
-        console.print(
-            "[yellow]⚠️  yt-dlp skips files matched by name, even if the requested "
-            "format differs. Delete the file(s) or pick another output directory "
-            "to force a redownload.[/yellow]"
-        )
+    report_already_downloaded(ydl_opts["logger"], Console())
     return code
 
 
@@ -985,15 +1008,7 @@ def download_from_info_json(
         report_failure(str(e), Console(), "Download error")
         return 1
 
-    if ydl_opts["logger"].already_downloaded:
-        console = Console()
-        for line in ydl_opts["logger"].already_downloaded:
-            console.print(f"[yellow]⚠️  {line}[/yellow]")
-        console.print(
-            "[yellow]⚠️  yt-dlp skips files matched by name, even if the requested "
-            "format differs. Delete the file(s) or pick another output directory "
-            "to force a redownload.[/yellow]"
-        )
+    report_already_downloaded(ydl_opts["logger"], Console())
     return code
 
 
