@@ -899,7 +899,7 @@ def download_audio(
         ],
     }
     if sponsorblock:
-        opts["sponsorblock_skip"] = ["sponsor", "selfpromo"]
+        configure_sponsorblock(opts)
 
     if opts_override:
         opts.update(opts_override)
@@ -995,6 +995,38 @@ def apply_sub_langs(opts: dict[str, Any], sub_langs: str) -> None:
     langs = requested_sub_langs(sub_langs)
     if langs is not None:
         opts["subtitleslangs"] = langs
+
+
+SPONSORBLOCK_CATEGORIES = ("sponsor", "selfpromo")
+
+
+def configure_sponsorblock(opts: dict[str, Any]) -> None:
+    """
+    Queues the two postprocessors that cut SponsorBlock segments out of a file.
+
+    yt-dlp has no `sponsorblock_skip` option. Its CLI builds these two itself, so
+    anything driving YoutubeDL through the API has to queue them explicitly:
+    SponsorBlock fetches the segments into info["sponsorblock_chapters"], and
+    ModifyChapters is what actually rewrites the file. SponsorBlock alone only
+    marks chapters, which is why setting one without the other looks like it
+    worked when nothing was removed.
+
+    SponsorBlock runs after_filter so the video id and duration are known.
+    ModifyChapters runs after_move, which is also where FFmpegExtractAudio lands
+    as post_process, so an audio cut is applied to the converted file — the same
+    order the yt-dlp CLI uses for --sponsorblock-remove with --extract-audio.
+    """
+    categories = list(SPONSORBLOCK_CATEGORIES)
+    postprocessors = list(opts.get("postprocessors") or [])
+    postprocessors += [
+        {"key": "SponsorBlock", "categories": categories, "when": "after_filter"},
+        {
+            "key": "ModifyChapters",
+            "remove_sponsor_segments": categories,
+            "when": "after_move",
+        },
+    ]
+    opts["postprocessors"] = postprocessors
 
 
 def configure_subtitles(
@@ -1479,7 +1511,7 @@ def do_download_interactive(
         "Skip sponsor and self-promotion segments using SponsorBlock?", default=False
     )
     if skip_sponsors:
-        opts["sponsorblock_skip"] = ["sponsor", "selfpromo"]
+        configure_sponsorblock(opts)
 
     # Ask about Subtitles (if downloading video)
     if target_dir == get_default_video_dir():
@@ -2142,7 +2174,7 @@ def download(
 
     # Setup SponsorBlock
     if sponsorblock:
-        opts["sponsorblock_skip"] = ["sponsor", "selfpromo"]
+        configure_sponsorblock(opts)
 
     # Setup Subtitles
     if write_subs or embed_subs:
