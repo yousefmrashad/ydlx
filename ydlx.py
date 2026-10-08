@@ -19,6 +19,7 @@ import typer
 import yt_dlp
 from rich import box
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import (
     BarColumn,
@@ -33,6 +34,7 @@ from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 from typer import Argument, Option, Typer
 from yt_dlp.cookies import CHROMIUM_BASED_BROWSERS
+from yt_dlp.postprocessor.common import PostProcessor
 from yt_dlp.utils import DownloadError
 
 app = Typer(
@@ -117,20 +119,15 @@ class MyLogger:
 
     console: Console
     verbose: bool
-    already_downloaded: list[str]
     reported_errors: set[str]
 
     def __init__(self, verbose: bool = False):
         self.console = Console()
         self.verbose = verbose
-        self.already_downloaded = []
         self.reported_errors = set()
 
     def debug(self, msg: str) -> None:
         # yt-dlp outputs debug and info messages through debug()
-        clean = strip_ansi(msg)
-        if "has already been downloaded" in clean:
-            self.already_downloaded.append(clean.replace("[download] ", ""))
         if msg.startswith("[debug] "):
             if self.verbose:
                 self.console.print(f"[grey50]{msg}[/grey50]")
@@ -157,8 +154,26 @@ class MyLogger:
         self.console.print(f"[bold red]❌ Error: {clean}[/bold red]")
 
 
+def is_subtitle_download(status: dict[str, Any]) -> bool:
+    """
+    Whether a progress-hook event is a subtitle track rather than a media file.
+
+    yt-dlp fetches subtitles through the same downloader and the same hooks as
+    media, but it hands the hook the track's own dict rather than the video's:
+    ext, name, url, protocol, and no id. A media event always carries the video
+    id, since that is what the output template is built from, so its absence is
+    the reliable tell. The file extension is not usable here -- yt-dlp's own
+    subtitle list covers only ass/lrc/srt/vtt and omits json, ttml and dfxp.
+
+    The tracker has to know because a track is announced under the name the
+    convertor is about to replace and delete, so the file it names does not
+    exist by the time the run finishes.
+    """
+    return "id" not in (status.get("info_dict") or {})
+
+
 class DownloadTracker:
-    """Manages a beautiful, real-time Rich progress bar for downloads."""
+    """Reports media downloads. Subtitle tracks are not media and are skipped."""
 
     progress: Progress | None
     task_id: TaskID | None
@@ -170,6 +185,11 @@ class DownloadTracker:
         self.current_filename = None
 
     def hook(self, d: dict[str, Any]) -> None:
+        # Checked before anything else so that a track arriving while a media
+        # bar is live neither draws its own bar nor closes that one. The track
+        # is summarised by whoever asked for it instead.
+        if is_subtitle_download(d):
+            return
         if d.get("status") == "downloading":
             total: int = int(d.get("total_bytes") or d.get("total_bytes_estimate") or 0)
             downloaded: int = int(d.get("downloaded_bytes") or 0)
@@ -216,6 +236,100 @@ class DownloadTracker:
             rich_console.print(
                 f"[bold green]✓[/bold green] Finished downloading: [cyan]{display_name}[/cyan]"
             )
+
+
+# =====================================================================
+# Download Recording
+# =====================================================================
+
+# Both facts below used to be recovered by matching yt-dlp's log lines in
+# MyLogger.debug. They are available as data instead: yt-dlp names the method it
+# calls when it declines a download, and it records the path of every subtitle
+# track it resolved in the info dict. Reading them there means neither depends on
+# a message staying worded as it is today, and a video whose title happens to
+# contain the old search phrase can no longer be reported as skipped.
+
+
+class DownloadRecord:
+    """What yt-dlp actually did, read back from its own callbacks."""
+
+    skipped: list[str]
+    subtitle_count: int
+
+    def __init__(self) -> None:
+        self.skipped = []
+        self.subtitle_count = 0
+
+
+class TrackingYoutubeDL(yt_dlp.YoutubeDL):
+    """
+    A YoutubeDL that records the files it declined to download.
+
+    yt-dlp settles "is this already here?" in exactly two places, and both call
+    report_file_already_downloaded with the path they found. Overriding it is
+    what makes a skip observable; a progress hook cannot be, because a skipped
+    file never reaches dl() and so never fires one.
+    """
+
+    record: DownloadRecord
+
+    def __init__(self, params: dict[str, Any], record: DownloadRecord) -> None:
+        self.record = record
+        super().__init__(cast(Any, params))
+
+    def report_file_already_downloaded(self, file_name: str) -> None:
+        self.record.skipped.append(file_name)
+        super().report_file_already_downloaded(file_name)
+
+
+class SubtitleCollectorPP(PostProcessor):
+    """
+    Counts the subtitle tracks yt-dlp produced, and touches nothing.
+
+    _write_subtitles stores the path it settled on for each track under
+    requested_subtitles[lang]["filepath"], whether it fetched the track or found
+    it already on disk. The before_dl phase runs after that and before the
+    download, so the path is already set, and it runs under skip_download too --
+    which is the only phase that does once no media is being fetched.
+
+    Registered last in that phase, so it counts the tracks the convertor left
+    rather than the .vtt sources it consumed. The count is replaced rather than
+    summed because it describes one video: a playlist entry with no subtitles
+    must not inherit the previous entry's tracks.
+    """
+
+    record: DownloadRecord
+
+    def __init__(self, record: DownloadRecord) -> None:
+        super().__init__(None)
+        self.record = record
+
+    def run(self, information: Any) -> tuple[list[str], Any]:
+        # The info dict is annotated loosely on purpose: yt-dlp declares a typed
+        # alias for it, but only in its type stubs, so naming it here would need
+        # an annotation that does not exist at run time.
+        info = cast(Any, information)
+        self.record.subtitle_count = sum(
+            1
+            for sub in (info.get("requested_subtitles") or {}).values()
+            if sub.get("filepath")
+        )
+        return [], information
+
+
+def build_downloader(ydl_opts: dict[str, Any], record: DownloadRecord) -> Any:
+    """
+    Builds a downloader wired to record into `record`.
+
+    The collector goes in here rather than through the postprocessors option
+    because yt-dlp only resolves that option by name, so a class of our own has
+    no name to be looked up under. Adding it to the chain after construction
+    also puts it last in before_dl, which is where the converted subtitle name
+    comes from.
+    """
+    ydl = TrackingYoutubeDL(ydl_opts, record)
+    ydl.add_post_processor(SubtitleCollectorPP(record), when="before_dl")
+    return ydl
 
 
 # =====================================================================
@@ -637,23 +751,26 @@ def report_failure(message: str, console: Console, prefix: str = "Error") -> Non
     console.print(f"[bold red]❌ {prefix}: {clean}[/bold red]")
 
 
-def report_already_downloaded(logger: MyLogger, console: Console) -> None:
+def report_already_downloaded(record: DownloadRecord, console: Console) -> None:
     """
     Warns about the files yt-dlp skipped because the target name already existed.
 
-    Nothing else surfaces these: yt-dlp reports them through the debug channel,
-    which info() drops unless -v, and it counts the skip as success, so the run
-    would otherwise end on a green tick having fetched nothing. Each skipped file
-    is listed, because on a playlist that is the only way to tell which ones.
+    Nothing else surfaces these: yt-dlp counts a skip as success and returns 0,
+    so the run would otherwise end on a green tick having fetched nothing. Each
+    skipped file is listed, because on a playlist that is the only way to tell
+    which ones.
 
-    Duplicates are collapsed: the subtitle-retry path reuses the same logger, so
-    the second attempt appends the files the first one already skipped.
+    Duplicates are collapsed: the subtitle-retry path reuses the same record, so
+    the second attempt records the files the first one already skipped.
     """
-    skipped = list(dict.fromkeys(logger.already_downloaded))
+    skipped = list(dict.fromkeys(record.skipped))
     if not skipped:
         return
-    for line in skipped:
-        console.print(f"[yellow]⚠️  {line}[/yellow]")
+    for path in skipped:
+        # Escaped because yt-dlp's default output template ends in " [id].ext",
+        # so the bracketed video id would otherwise be read as a markup tag and
+        # silently dropped from every name printed here.
+        console.print(f"[yellow]⚠️  Already downloaded: {escape(path)}[/yellow]")
     console.print(f"[yellow]⚠️  {ALREADY_DOWNLOADED_HINT}[/yellow]")
 
 
@@ -888,7 +1005,7 @@ def make_extract_opts(verbose: bool = False) -> dict[str, Any]:
 
 
 def make_download_opts(target_dir: Path, verbose: bool = False) -> dict[str, Any]:
-    """Extraction options plus the progress bar and output directory."""
+    """The YoutubeDL options shared by every extraction and download path."""
     opts = make_extract_opts(verbose)
     opts["progress_hooks"] = [DownloadTracker().hook]
     opts["paths"] = {"home": str(target_dir)}
@@ -958,8 +1075,17 @@ def download_video(
     cookie_file: str | None = None,
     output_dir: str | Path | None = None,
     verbose: bool = False,
+    record: DownloadRecord | None = None,
 ) -> int:
-    """Download a video with optional custom configurations."""
+    """Download a video with optional custom configurations.
+
+    A caller that needs to know what yt-dlp did passes a record and keeps it:
+    the one built here is written to by the downloader and then discarded, so
+    nothing outside this function can see what it captured.
+    """
+    if record is None:
+        record = DownloadRecord()
+
     target_dir = Path(output_dir) if output_dir else get_default_video_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -970,7 +1096,7 @@ def download_video(
     add_opts(ydl_opts, extra_opts)
 
     try:
-        with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
+        with build_downloader(ydl_opts, record) as ydl:
             code = int(ydl.download([url]))
     except DownloadError as e:
         msg = strip_ansi(str(e))
@@ -986,11 +1112,11 @@ def download_video(
                 if key not in ("writesubtitles", "writeautomaticsub")
             }
             retry_opts["progress_hooks"] = [DownloadTracker().hook]
-            with yt_dlp.YoutubeDL(cast(Any, retry_opts)) as ydl:
+            with build_downloader(retry_opts, record) as ydl:
                 code = int(ydl.download([url]))
-            # retry_opts reuses the original logger, so anything the first
-            # attempt collected is in the list too; reporting dedupes.
-            report_already_downloaded(ydl_opts["logger"], Console())
+            # The retry shares the record, so the files the first attempt
+            # skipped are in it too; reporting dedupes.
+            report_already_downloaded(record, Console())
             return code
         report_failure(msg, Console(), "Download error")
         return 1
@@ -998,7 +1124,7 @@ def download_video(
         report_failure(str(e), Console(), "Download error")
         return 1
 
-    report_already_downloaded(ydl_opts["logger"], Console())
+    report_already_downloaded(record, Console())
     return code
 
 
@@ -1044,6 +1170,7 @@ def download_from_info_json(
     verbose: bool = False,
 ) -> int:
     """Download video using an existing info.json file."""
+    record = DownloadRecord()
     target_dir = Path(output_dir) if output_dir else get_default_video_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1054,7 +1181,7 @@ def download_from_info_json(
     add_opts(ydl_opts, extra_opts)
 
     try:
-        with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
+        with build_downloader(ydl_opts, record) as ydl:
             code = int(ydl.download_with_info_file(info_file))
     except DownloadError as e:
         report_failure(str(e), Console(), "Download error")
@@ -1063,7 +1190,7 @@ def download_from_info_json(
         report_failure(str(e), Console(), "Download error")
         return 1
 
-    report_already_downloaded(ydl_opts["logger"], Console())
+    report_already_downloaded(record, Console())
     return code
 
 
@@ -1194,6 +1321,7 @@ def download_subtitles_only(
     cookie_file: str | None = None,
     output_dir: str | Path | None = None,
     verbose: bool = False,
+    record: DownloadRecord | None = None,
 ) -> int:
     """Download subtitles only without downloading the media."""
     target_dir = Path(output_dir) if output_dir else get_default_video_dir()
@@ -1227,6 +1355,7 @@ def download_subtitles_only(
         cookie_file=cookie_file,
         output_dir=target_dir,
         verbose=verbose,
+        record=record,
     )
 
 
@@ -1243,10 +1372,7 @@ def report_subtitle_download(
     verbose: bool = False,
 ) -> int:
     """Download subtitles and report how many files landed; returns an exit code."""
-    # Snapshot before the download, so the directory has to exist first: the
-    # default-directory resolvers no longer create it.
-    target_dir.mkdir(parents=True, exist_ok=True)
-    existing = {p for p in target_dir.iterdir() if p.is_file()}
+    record = DownloadRecord()
     error_code = download_subtitles_only(
         url,
         sub_langs=langs,
@@ -1256,12 +1382,16 @@ def report_subtitle_download(
         cookie_file=cookie_file,
         output_dir=target_dir,
         verbose=verbose,
+        record=record,
     )
     if error_code:
         console.print("[bold red]❌ Subtitles download failed![/bold red]")
         return error_code
-    new_files = {p for p in target_dir.iterdir() if p.is_file()} - existing
-    if not new_files:
+    # Counted from the tracks yt-dlp resolved, not from the directory. A re-run
+    # rewrites the same filenames, so diffing the directory showed no new files
+    # and reported failure for a download that had in fact succeeded.
+    written = record.subtitle_count
+    if not written:
         console.print(
             f"[bold red]❌ No subtitles found for '{langs}' on this video.[/bold red]"
         )
@@ -1270,7 +1400,7 @@ def report_subtitle_download(
         )
         return 1
     console.print(
-        f"[bold green]✓ Downloaded {len(new_files)} subtitle file(s) to [cyan]{target_dir}[/cyan][/bold green]"
+        f"[bold green]✓ Downloaded {written} subtitle file(s) to [cyan]{target_dir}[/cyan][/bold green]"
     )
     return 0
 
