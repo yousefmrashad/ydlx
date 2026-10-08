@@ -813,27 +813,40 @@ def make_download_opts(target_dir: Path, verbose: bool = False) -> dict[str, Any
     return opts
 
 
-def apply_opts_override(
-    ydl_opts: dict[str, Any], opts_override: dict[str, Any] | None
-) -> None:
-    """
-    Merges caller-supplied options over the defaults.
+# The keys the two builders above own. add_opts rejects any caller options
+# naming one of these, so the sets must stay in step: test_ydl_opts asserts
+# this equals what the builders actually return.
+BASE_OPT_KEYS = frozenset(
+    {
+        # make_extract_opts
+        "logger",
+        "quiet",
+        "color",
+        "remote_components",
+        # make_download_opts
+        "progress_hooks",
+        "paths",
+    }
+)
 
-    postprocessors concatenate rather than replace, so a caller can add one
-    without silently dropping the postprocessors the download path already
-    queued. Everything else is a plain overwrite, which is why no caller passes
-    the keys make_extract_opts owns.
+
+def add_opts(ydl_opts: dict[str, Any], extra_opts: dict[str, Any] | None) -> None:
     """
-    if not opts_override:
+    Adds caller-supplied options to the ones the builders produced.
+
+    The two key sets are disjoint by design, so this only ever adds. Rather than
+    trust that, it rejects caller options naming a key make_extract_opts or
+    make_download_opts owns: a plain update would silently replace the logger,
+    the progress bar, or the cookie keys apply_cookie_opts just wrote, and the
+    download would carry on with no indication anything had been dropped.
+    """
+    if not extra_opts:
         return
-    for key, value in opts_override.items():
-        if key == "postprocessors":
-            ydl_opts["postprocessors"] = [
-                *(ydl_opts.get("postprocessors") or []),
-                *value,
-            ]
-        else:
-            ydl_opts[key] = value
+    if clobbered := sorted(BASE_OPT_KEYS.intersection(extra_opts)):
+        raise ValueError(
+            f"extra_opts may not replace the base options: {', '.join(clobbered)}"
+        )
+    ydl_opts.update(extra_opts)
 
 
 def queue_postprocessors(opts: dict[str, Any], *postprocessors: dict[str, Any]) -> None:
@@ -858,7 +871,7 @@ def get_video_info(
 
 def download_video(
     url: str,
-    opts_override: dict[str, Any] | None = None,
+    extra_opts: dict[str, Any] | None = None,
     browser_spec: tuple[str, ...] | None = None,
     cookie_file: str | None = None,
     output_dir: str | Path | None = None,
@@ -872,7 +885,7 @@ def download_video(
 
     apply_cookie_opts(ydl_opts, browser_spec, cookie_file)
 
-    apply_opts_override(ydl_opts, opts_override)
+    add_opts(ydl_opts, extra_opts)
 
     try:
         with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
@@ -936,7 +949,7 @@ def download_audio(
 
     return download_video(
         url,
-        opts_override=opts,
+        extra_opts=opts,
         browser_spec=browser_spec,
         cookie_file=cookie_file,
         output_dir=target_dir,
@@ -946,7 +959,7 @@ def download_audio(
 
 def download_from_info_json(
     info_file: str,
-    opts_override: dict[str, Any] | None = None,
+    extra_opts: dict[str, Any] | None = None,
     browser_spec: tuple[str, ...] | None = None,
     cookie_file: str | None = None,
     output_dir: str | Path | None = None,
@@ -960,7 +973,7 @@ def download_from_info_json(
 
     apply_cookie_opts(ydl_opts, browser_spec, cookie_file)
 
-    apply_opts_override(ydl_opts, opts_override)
+    add_opts(ydl_opts, extra_opts)
 
     try:
         with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
@@ -1139,7 +1152,7 @@ def download_subtitles_only(
 
     return download_video(
         url,
-        opts_override=opts,
+        extra_opts=opts,
         browser_spec=browser_spec,
         cookie_file=cookie_file,
         output_dir=target_dir,
@@ -1562,7 +1575,7 @@ def do_download_interactive(
     console.print(f"[blue]Starting download to [cyan]{target_dir}[/cyan]...[/blue]")
     error_code = download_video(
         url,
-        opts_override=opts,
+        extra_opts=opts,
         browser_spec=session_browser_spec(),
         cookie_file=session_cookies_file,
         output_dir=target_dir,
@@ -2214,7 +2227,7 @@ def download(
         )
         error_code = download_from_info_json(
             info_json,
-            opts_override=opts,
+            extra_opts=opts,
             browser_spec=browser_spec,
             cookie_file=cookies,
             output_dir=target_dir,
@@ -2229,7 +2242,7 @@ def download(
         )
         error_code = download_video(
             url,
-            opts_override=opts,
+            extra_opts=opts,
             browser_spec=browser_spec,
             cookie_file=cookies,
             output_dir=target_dir,
