@@ -111,8 +111,17 @@ ydlx download "https://www.youtube.com/watch?v=..." --subs --auto-subs
 # Skip sponsor segments
 ydlx download "https://www.youtube.com/watch?v=..." -s
 
+# Only videos in a duration window (playlists)
+ydlx download "https://www.youtube.com/playlist?list=..." --min-duration 60 --max-duration 600
+
+# Keep subtitles in WebVTT instead of converting to .srt
+ydlx download "https://www.youtube.com/watch?v=..." --subs --sub-format vtt
+
 # Custom output destination
 ydlx download "https://www.youtube.com/watch?v=..." -o "./custom_folder"
+
+# Reuse a saved info.json instead of re-fetching metadata
+ydlx download --info-json "./video.info.json"
 ```
 
 | Preset | Result |
@@ -155,21 +164,13 @@ ydlx info "https://www.youtube.com/watch?v=..." --save
 ydlx info "https://www.youtube.com/watch?v=..." -o "./metadata"
 ```
 
-### Shared Flags
-| Flag | Meaning |
-|---|---|
-| `-o` | Output directory |
-| `-b`, `--cookies-from-browser` | Extract cookies from browser (brave, chrome, chromium, edge, firefox, opera, safari, vivaldi, whale). Takes `BROWSER` or `BROWSER:<profile path>` |
-| `--cookies` | Path to a Netscape `cookies.txt` file |
-| `-l` | Comma-separated subtitle languages |
-| `-S` | Download subtitles as a separate file |
-| `--auto-subs` / `--no-auto-subs` | Include auto-generated captions |
-| `-s` | Skip sponsor segments via SponsorBlock |
-| `-v` | Verbose output |
+### Flags
 
-Cookie flags take precedence over saved settings: passing `-b` or `--cookies` overrides the source stored in the interactive menu entirely, so a flag never silently merges with a previously saved one. Pass both flags together if you deliberately want a `cookies.txt` layered over browser cookies. Passing neither uses the saved source.
+Every command lists the flags it accepts under `ydlx <command> --help`.
 
 ### Cookies
+
+`-b` and `--cookies` take precedence over saved settings: passing one overrides the source stored in the interactive menu entirely, so a flag never silently merges with a previously saved one. Pass both together if you deliberately want a `cookies.txt` layered over browser cookies. Passing neither uses the saved source.
 
 Cookie reads fail on some setups, and ydlx explains the common cases instead of printing a raw yt-dlp error:
 

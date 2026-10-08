@@ -2210,29 +2210,6 @@ def audio(
     codec: Annotated[
         str, Option("--codec", "-c", help="Audio codec (m4a, mp3, wav, flac, etc.)")
     ] = "m4a",
-    subtitles: Annotated[
-        bool,
-        Option(
-            "--subs",
-            "-S",
-            help="Download subtitles/lyrics alongside audio if available",
-        ),
-    ] = False,
-    sub_langs: Annotated[
-        str,
-        Option(
-            "--sub-langs",
-            "-l",
-            help="Comma-separated subtitle languages (e.g. 'en', 'ar', 'all')",
-        ),
-    ] = "en",
-    auto_subs: Annotated[
-        bool,
-        Option(
-            "--auto-subs/--no-auto-subs",
-            help="Include auto-generated captions if official subtitles are missing",
-        ),
-    ] = True,
     cookies_from_browser: Annotated[
         str | None,
         Option("--cookies-from-browser", "-b", help=BROWSER_OPTION_HELP),
@@ -2268,24 +2245,12 @@ def audio(
     console.print(
         f"[blue]Extracting audio ({codec}) to [cyan]{target_dir}[/cyan] from: [cyan]{url}[/cyan][/blue]"
     )
-    opts: dict[str, Any] = {}
-    if subtitles:
-        configure_subtitles(
-            opts,
-            write_subs=True,
-            embed_subs=False,
-            auto_subs=auto_subs,
-            sub_langs=sub_langs,
-            sub_format="srt",
-        )
-
     error_code = download_audio(
         url,
         format_codec=codec,
         browser_spec=browser_spec,
         cookie_file=cookies,
         output_dir=target_dir,
-        opts_override=opts if opts else None,
         sponsorblock=sponsorblock,
         verbose=verbose,
     )
