@@ -4,7 +4,12 @@ from typing import Any, cast
 
 from yt_dlp import YoutubeDL
 
-from ydlx import SPONSORBLOCK_CATEGORIES, configure_sponsorblock, make_audio_format_spec
+from ydlx import (
+    SPONSORBLOCK_CATEGORIES,
+    configure_sponsorblock,
+    configure_subtitles,
+    make_audio_format_spec,
+)
 
 
 def test_configure_sponsorblock_queues_both_postprocessors() -> None:
@@ -73,3 +78,31 @@ def test_sponsorblock_skip_param_is_not_used() -> None:
     """The old dead key: yt-dlp has no such option and silently ignores it."""
     with YoutubeDL(cast(Any, {"sponsorblock_skip": ["sponsor"]})) as ydl:
         assert not any(cast(Any, ydl)._pps.values())
+
+
+def test_sponsorblock_and_subtitles_compose_in_either_order() -> None:
+    """
+    Neither helper may drop what the other queued.
+
+    configure_sponsorblock and configure_subtitles both own the
+    postprocessors key, so whichever runs second has to see the first one's work.
+    Relative order follows call order, so only the contents are pinned here.
+    """
+    expected = {"FFmpegSubtitlesConvertor", "SponsorBlock", "ModifyChapters"}
+
+    sponsorblock_first: dict[str, Any] = {
+        "postprocessors": [{"key": "FFmpegExtractAudio"}]
+    }
+    configure_sponsorblock(sponsorblock_first)
+    configure_subtitles(sponsorblock_first, write_subs=True)
+
+    subtitles_first: dict[str, Any] = {
+        "postprocessors": [{"key": "FFmpegExtractAudio"}]
+    }
+    configure_subtitles(subtitles_first, write_subs=True)
+    configure_sponsorblock(subtitles_first)
+
+    for opts in (sponsorblock_first, subtitles_first):
+        keys = [pp["key"] for pp in opts["postprocessors"]]
+        assert keys[0] == "FFmpegExtractAudio"
+        assert set(keys[1:]) == expected

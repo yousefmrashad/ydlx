@@ -8,6 +8,7 @@ import yt_dlp
 from ydlx import (
     configure_subtitles,
     make_duration_filter,
+    make_subtitle_convertor,
     parse_sub_langs,
     requested_sub_langs,
 )
@@ -90,6 +91,19 @@ def test_configure_subtitles_appends_to_existing_postprocessors() -> None:
 
     assert opts["postprocessors"][0]["key"] == "FFmpegExtractAudio"
     assert "FFmpegSubtitlesConvertor" in _keys(opts)
+
+
+def test_make_subtitle_convertor_targets_the_requested_format() -> None:
+    for fmt in ("srt", "vtt", "SRT"):
+        convertor = make_subtitle_convertor(fmt)
+        assert convertor is not None
+        assert convertor["key"] == "FFmpegSubtitlesConvertor"
+        assert convertor["format"] == fmt.lower()
+        assert convertor["when"] == "before_dl"
+
+
+def test_make_subtitle_convertor_skips_non_convertible_formats() -> None:
+    assert make_subtitle_convertor("best") is None
 
 
 def test_configure_subtitles_embed_flags_availability() -> None:

@@ -788,6 +788,59 @@ def prompt_for_url(console: Console) -> str:
 # =====================================================================
 
 
+def make_extract_opts(verbose: bool = False) -> dict[str, Any]:
+    """The YoutubeDL options shared by every extraction and download path."""
+    return {
+        "logger": MyLogger(verbose=verbose),
+        "quiet": not verbose,
+        # yt-dlp colors ERROR:/WARNING: prefixes whenever stderr is a TTY,
+        # even when a custom logger is set; our logger does its own styling.
+        "color": "never",
+        # Fetch yt-dlp's official challenge solver scripts so YouTube's JS
+        # challenges get solved when a JS runtime (e.g. Deno) is available,
+        # instead of silently accepting throttled/missing formats. On the
+        # info.json path this only matters for the re-extract fallback in
+        # download_with_info_file; the formats it reads are already solved.
+        "remote_components": ["ejs:github"],
+    }
+
+
+def make_download_opts(target_dir: Path, verbose: bool = False) -> dict[str, Any]:
+    """Extraction options plus the progress bar and output directory."""
+    opts = make_extract_opts(verbose)
+    opts["progress_hooks"] = [DownloadTracker().hook]
+    opts["paths"] = {"home": str(target_dir)}
+    return opts
+
+
+def apply_opts_override(
+    ydl_opts: dict[str, Any], opts_override: dict[str, Any] | None
+) -> None:
+    """
+    Merges caller-supplied options over the defaults.
+
+    postprocessors concatenate rather than replace, so a caller can add one
+    without silently dropping the postprocessors the download path already
+    queued. Everything else is a plain overwrite, which is why no caller passes
+    the keys make_extract_opts owns.
+    """
+    if not opts_override:
+        return
+    for key, value in opts_override.items():
+        if key == "postprocessors":
+            ydl_opts["postprocessors"] = [
+                *(ydl_opts.get("postprocessors") or []),
+                *value,
+            ]
+        else:
+            ydl_opts[key] = value
+
+
+def queue_postprocessors(opts: dict[str, Any], *postprocessors: dict[str, Any]) -> None:
+    """Appends postprocessors to opts, creating the list when it is absent."""
+    opts["postprocessors"] = [*(opts.get("postprocessors") or []), *postprocessors]
+
+
 def get_video_info(
     url: str,
     browser_spec: tuple[str, ...] | None = None,
@@ -795,12 +848,7 @@ def get_video_info(
     verbose: bool = False,
 ) -> dict[str, Any]:
     """Extract video metadata without downloading it."""
-    ydl_opts: dict[str, Any] = {
-        "logger": MyLogger(verbose=verbose),
-        "quiet": not verbose,
-        "color": "never",
-        "remote_components": ["ejs:github"],
-    }
+    ydl_opts = make_extract_opts(verbose)
     apply_cookie_opts(ydl_opts, browser_spec, cookie_file)
 
     with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
@@ -820,25 +868,11 @@ def download_video(
     target_dir = Path(output_dir) if output_dir else get_default_video_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    tracker = DownloadTracker()
-    ydl_opts: dict[str, Any] = {
-        "logger": MyLogger(verbose=verbose),
-        "progress_hooks": [tracker.hook],
-        "quiet": True,
-        "paths": {"home": str(target_dir)},
-        # yt-dlp colors ERROR:/WARNING: prefixes whenever stderr is a TTY,
-        # even when a custom logger is set; our logger does its own styling.
-        "color": "never",
-        # Fetch yt-dlp's official challenge solver scripts so YouTube's JS
-        # challenges get solved when a JS runtime (e.g. Deno) is available,
-        # instead of silently accepting throttled/missing formats.
-        "remote_components": ["ejs:github"],
-    }
+    ydl_opts = make_download_opts(target_dir, verbose)
 
     apply_cookie_opts(ydl_opts, browser_spec, cookie_file)
 
-    if opts_override:
-        ydl_opts.update(opts_override)
+    apply_opts_override(ydl_opts, opts_override)
 
     try:
         with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
@@ -883,7 +917,6 @@ def download_audio(
     browser_spec: tuple[str, ...] | None = None,
     cookie_file: str | None = None,
     output_dir: str | Path | None = None,
-    opts_override: dict[str, Any] | None = None,
     sponsorblock: bool = False,
     verbose: bool = False,
 ) -> int:
@@ -900,9 +933,6 @@ def download_audio(
     }
     if sponsorblock:
         configure_sponsorblock(opts)
-
-    if opts_override:
-        opts.update(opts_override)
 
     return download_video(
         url,
@@ -926,19 +956,11 @@ def download_from_info_json(
     target_dir = Path(output_dir) if output_dir else get_default_video_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    tracker = DownloadTracker()
-    ydl_opts: dict[str, Any] = {
-        "logger": MyLogger(verbose=verbose),
-        "progress_hooks": [tracker.hook],
-        "quiet": True,
-        "paths": {"home": str(target_dir)},
-        "color": "never",
-    }
+    ydl_opts = make_download_opts(target_dir, verbose)
 
     apply_cookie_opts(ydl_opts, browser_spec, cookie_file)
 
-    if opts_override:
-        ydl_opts.update(opts_override)
+    apply_opts_override(ydl_opts, opts_override)
 
     try:
         with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
@@ -1017,16 +1039,30 @@ def configure_sponsorblock(opts: dict[str, Any]) -> None:
     order the yt-dlp CLI uses for --sponsorblock-remove with --extract-audio.
     """
     categories = list(SPONSORBLOCK_CATEGORIES)
-    postprocessors = list(opts.get("postprocessors") or [])
-    postprocessors += [
+    queue_postprocessors(
+        opts,
         {"key": "SponsorBlock", "categories": categories, "when": "after_filter"},
         {
             "key": "ModifyChapters",
             "remove_sponsor_segments": categories,
             "when": "after_move",
         },
-    ]
-    opts["postprocessors"] = postprocessors
+    )
+
+
+def make_subtitle_convertor(sub_format: str) -> dict[str, Any] | None:
+    """
+    Returns a converter postprocessor for the target format, or None when the
+    format needs no conversion.
+
+    The CLI registers the converter as "before_dl": that phase runs right after
+    subtitle files are written, including under skip_download, where later PP
+    phases never run.
+    """
+    fmt = sub_format.lower()
+    if fmt not in ("srt", "vtt"):
+        return None
+    return {"key": "FFmpegSubtitlesConvertor", "format": fmt, "when": "before_dl"}
 
 
 def configure_subtitles(
@@ -1052,27 +1088,17 @@ def configure_subtitles(
     # track and let the convertor below produce the .srt file.
     opts["subtitlesformat"] = "best" if sub_format.lower() == "srt" else sub_format
 
-    if "postprocessors" not in opts:
-        opts["postprocessors"] = []
-
-    # Convert subtitles to srt if requested. The CLI registers this converter
-    # as "before_dl": that phase runs right after subtitle files are written,
-    # including under skip_download, where later PP phases never run.
-    if sub_format.lower() in ("srt", "vtt"):
-        opts["postprocessors"].append(
-            {
-                "key": "FFmpegSubtitlesConvertor",
-                "format": sub_format.lower(),
-                "when": "before_dl",
-            }
-        )
+    convertor = make_subtitle_convertor(sub_format)
+    if convertor:
+        queue_postprocessors(opts, convertor)
 
     if embed_subs:
-        opts["postprocessors"].append(
+        queue_postprocessors(
+            opts,
             {
                 "key": "FFmpegEmbedSubtitle",
                 "already_have_subtitle": write_subs,
-            }
+            },
         )
 
 
@@ -1107,18 +1133,9 @@ def download_subtitles_only(
 
     # Only convert when the target format is a convertible subtitle container;
     # anything else (e.g. "best") saves files in their native extracted format.
-    # "before_dl" mirrors the yt-dlp CLI: that phase runs right after subtitle
-    # files are written, including under skip_download, where later PP phases
-    # never run.
-    opts["postprocessors"] = []
-    if sub_format.lower() in ("srt", "vtt"):
-        opts["postprocessors"].append(
-            {
-                "key": "FFmpegSubtitlesConvertor",
-                "format": sub_format.lower(),
-                "when": "before_dl",
-            }
-        )
+    convertor = make_subtitle_convertor(sub_format)
+    if convertor:
+        queue_postprocessors(opts, convertor)
 
     return download_video(
         url,
