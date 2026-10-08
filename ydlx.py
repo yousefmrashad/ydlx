@@ -5,7 +5,7 @@ import sys
 from collections.abc import Callable
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, NamedTuple, cast
 from urllib.parse import urlparse
 
 # Reconfigure stdout/stderr to support UTF-8 characters (like Arabic and emojis) on Windows
@@ -86,6 +86,11 @@ COOKIE_FILE_OPTION_HELP = (
     'Path to a Netscape cookies.txt file (export it with a "Get cookies.txt '
     'LOCALLY" extension when your browser cannot be read directly)'
 )
+
+# Format choices shared by every prompt, so the audio and subtitle flows cannot
+# drift apart in wording or in which codecs they offer.
+AUDIO_CODEC_CHOICES: tuple[str, ...] = ("m4a", "opus", "mp3", "wav", "flac")
+SUBTITLE_FORMAT_CHOICES: tuple[str, ...] = ("srt", "vtt", "best")
 
 # =====================================================================
 # Custom Logger and Progress Tracker
@@ -370,28 +375,26 @@ def make_video_format_spec(preset: VideoPreset, max_height: int | None = None) -
 
 
 def get_default_downloads_dir() -> Path:
-    """Returns the platform-agnostic default Downloads directory."""
+    """Resolves the platform-agnostic default Downloads directory.
+
+    Resolution only; nothing is created on disk. The download entry points
+    mkdir the directory they are about to write into, so the menu can name the
+    path without bringing it into existence.
+    """
     xdg_download = os.environ.get("XDG_DOWNLOAD_DIR")
     if xdg_download and os.path.exists(xdg_download):
-        download_path = Path(xdg_download)
-    else:
-        download_path = Path.home() / "Downloads"
-    download_path.mkdir(parents=True, exist_ok=True)
-    return download_path
+        return Path(xdg_download)
+    return Path.home() / "Downloads"
 
 
 def get_default_music_dir() -> Path:
-    """Returns the platform-agnostic audio download directory (~/Downloads/audio)."""
-    audio_dir = get_default_downloads_dir() / "audio"
-    audio_dir.mkdir(parents=True, exist_ok=True)
-    return audio_dir
+    """Resolves the audio download directory (~/Downloads/audio), creating nothing."""
+    return get_default_downloads_dir() / "audio"
 
 
 def get_default_video_dir() -> Path:
-    """Returns the platform-agnostic video download directory (~/Downloads/video)."""
-    video_dir = get_default_downloads_dir() / "video"
-    video_dir.mkdir(parents=True, exist_ok=True)
-    return video_dir
+    """Resolves the video download directory (~/Downloads/video), creating nothing."""
+    return get_default_downloads_dir() / "video"
 
 
 # =====================================================================
@@ -810,6 +813,58 @@ def prompt_for_url(console: Console) -> str:
         )
 
 
+class SubtitleOptions(NamedTuple):
+    """The subtitle answers shared by every flow that downloads subtitles."""
+
+    langs: str
+    sub_format: str
+    auto_subs: bool
+
+
+class AudioOptions(NamedTuple):
+    """The audio answers shared by every flow that downloads audio."""
+
+    codec: str
+    sponsorblock: bool
+
+
+def prompt_subtitle_options() -> SubtitleOptions:
+    """Asks the subtitle questions, in the one order every flow uses.
+
+    The languages, format, and auto-caption questions used to be asked in two
+    different orders depending on the entry point; one definition keeps the
+    wording from drifting too.
+    """
+    langs = Prompt.ask(
+        "Subtitle languages (comma-separated, e.g. 'en', 'ar', 'all')",
+        default="en",
+    )
+    sub_format = Prompt.ask(
+        "Subtitle format",
+        choices=list(SUBTITLE_FORMAT_CHOICES),
+        default="srt",
+    )
+    auto_subs = Confirm.ask(
+        "Include auto-generated captions if official subtitles are missing?",
+        default=True,
+    )
+    return SubtitleOptions(langs=langs, sub_format=sub_format, auto_subs=auto_subs)
+
+
+def prompt_audio_options() -> AudioOptions:
+    """Asks the audio questions shared by every audio download."""
+    codec = Prompt.ask(
+        "Select audio format",
+        choices=list(AUDIO_CODEC_CHOICES),
+        default="m4a",
+    )
+    sponsorblock = Confirm.ask(
+        "Skip sponsor and self-promotion segments using SponsorBlock?",
+        default=False,
+    )
+    return AudioOptions(codec=codec, sponsorblock=sponsorblock)
+
+
 # =====================================================================
 # API / Core Functions
 # =====================================================================
@@ -1188,6 +1243,9 @@ def report_subtitle_download(
     verbose: bool = False,
 ) -> int:
     """Download subtitles and report how many files landed; returns an exit code."""
+    # Snapshot before the download, so the directory has to exist first: the
+    # default-directory resolvers no longer create it.
+    target_dir.mkdir(parents=True, exist_ok=True)
     existing = {p for p in target_dir.iterdir() if p.is_file()}
     error_code = download_subtitles_only(
         url,
@@ -1558,34 +1616,25 @@ def do_download_interactive(
     if skip_sponsors:
         configure_sponsorblock(opts)
 
-    # Ask about Subtitles (if downloading video)
-    if target_dir == get_default_video_dir():
-        want_subs = Confirm.ask("Download / embed subtitles?", default=False)
-        if want_subs:
-            sub_mode = Prompt.ask(
-                "Subtitle placement",
-                choices=["embed", "external", "both"],
-                default="embed",
-            )
-            sub_langs = Prompt.ask(
-                "Subtitle languages (comma-separated, e.g. 'en', 'ar', 'all')",
-                default="en",
-            )
-            sub_format = Prompt.ask(
-                "Subtitle format", choices=["srt", "vtt", "best"], default="srt"
-            )
-            auto_subs = Confirm.ask(
-                "Include auto-generated captions if official subtitles are missing?",
-                default=True,
-            )
-            configure_subtitles(
-                opts,
-                write_subs=(sub_mode in ("external", "both")),
-                embed_subs=(sub_mode in ("embed", "both")),
-                auto_subs=auto_subs,
-                sub_langs=sub_langs,
-                sub_format=sub_format,
-            )
+    # Ask about Subtitles. This flow only ever downloads media to the video
+    # directory, so the prompt always applies; it used to be guarded by
+    # `target_dir == get_default_video_dir()`, which was always true.
+    want_subs = Confirm.ask("Download / embed subtitles?", default=False)
+    if want_subs:
+        sub_mode = Prompt.ask(
+            "Subtitle placement",
+            choices=["embed", "external", "both"],
+            default="embed",
+        )
+        subs = prompt_subtitle_options()
+        configure_subtitles(
+            opts,
+            write_subs=(sub_mode in ("external", "both")),
+            embed_subs=(sub_mode in ("embed", "both")),
+            auto_subs=subs.auto_subs,
+            sub_langs=subs.langs,
+            sub_format=subs.sub_format,
+        )
 
     console.print(f"[blue]Starting download to [cyan]{target_dir}[/cyan]...[/blue]")
     error_code = download_video(
@@ -1599,6 +1648,42 @@ def do_download_interactive(
         console.print("[bold red]❌ Download failed![/bold red]")
     else:
         console.print("[bold green]✓ Download completed successfully![/bold green]")
+
+
+def download_subtitles_interactively(url: str, console: Console) -> None:
+    """Asks for subtitle options and downloads them into the video directory."""
+    options = prompt_subtitle_options()
+    video_dir = get_default_video_dir()
+    console.print(
+        f"[blue]Downloading subtitles ({options.langs}) to [cyan]{video_dir}[/cyan]...[/blue]"
+    )
+    _ = report_subtitle_download(
+        url,
+        video_dir,
+        console,
+        langs=options.langs,
+        auto_subs=options.auto_subs,
+        sub_format=options.sub_format,
+        browser_spec=session_browser_spec(),
+        cookie_file=session_cookies_file,
+    )
+
+
+def download_audio_interactively(url: str, console: Console) -> None:
+    """Asks for audio options and downloads into the music directory."""
+    options = prompt_audio_options()
+    music_dir = get_default_music_dir()
+    console.print(
+        f"[blue]Starting audio download ({options.codec}) to [cyan]{music_dir}[/cyan]...[/blue]"
+    )
+    _ = download_audio(
+        url,
+        options.codec,
+        browser_spec=session_browser_spec(),
+        cookie_file=session_cookies_file,
+        output_dir=music_dir,
+        sponsorblock=options.sponsorblock,
+    )
 
 
 def run_interactive_menu() -> None:
@@ -1720,53 +1805,9 @@ def run_interactive_menu() -> None:
             elif sub_choice == "2":
                 do_download_interactive(url, info, console)
             elif sub_choice == "3":
-                sub_langs = Prompt.ask(
-                    "Subtitle languages (comma-separated, e.g. 'en', 'ar', 'all')",
-                    default="en",
-                )
-                auto_subs = Confirm.ask(
-                    "Include auto-generated captions if official subtitles are missing?",
-                    default=True,
-                )
-                sub_format = Prompt.ask(
-                    "Subtitle format", choices=["srt", "vtt", "best"], default="srt"
-                )
-                video_dir = get_default_video_dir()
-                console.print(
-                    f"[blue]Downloading subtitles ({sub_langs}) to [cyan]{video_dir}[/cyan]...[/blue]"
-                )
-                _ = report_subtitle_download(
-                    url,
-                    video_dir,
-                    console,
-                    langs=sub_langs,
-                    auto_subs=auto_subs,
-                    sub_format=sub_format,
-                    browser_spec=session_browser_spec(),
-                    cookie_file=session_cookies_file,
-                )
+                download_subtitles_interactively(url, console)
             elif sub_choice == "4":
-                codec = Prompt.ask(
-                    "Select audio format",
-                    choices=["m4a", "opus", "mp3", "wav", "flac"],
-                    default="m4a",
-                )
-                skip_sponsors = Confirm.ask(
-                    "Skip sponsor and self-promotion segments using SponsorBlock?",
-                    default=False,
-                )
-                music_dir = get_default_music_dir()
-                console.print(
-                    f"[blue]Starting audio download ({codec}) to [cyan]{music_dir}[/cyan]...[/blue]"
-                )
-                _ = download_audio(
-                    url,
-                    codec,
-                    browser_spec=session_browser_spec(),
-                    cookie_file=session_cookies_file,
-                    output_dir=music_dir,
-                    sponsorblock=skip_sponsors,
-                )
+                download_audio_interactively(url, console)
 
         elif choice == "2":
             url = prompt_for_url(console)
@@ -1774,55 +1815,11 @@ def run_interactive_menu() -> None:
 
         elif choice == "3":
             url = prompt_for_url(console)
-            codec = Prompt.ask(
-                "Select audio format",
-                choices=["m4a", "opus", "mp3", "wav", "flac"],
-                default="m4a",
-            )
-            skip_sponsors = Confirm.ask(
-                "Skip sponsor and self-promotion segments using SponsorBlock?",
-                default=False,
-            )
-            music_dir = get_default_music_dir()
-            console.print(
-                f"[blue]Starting audio download ({codec}) to [cyan]{music_dir}[/cyan]...[/blue]"
-            )
-            _ = download_audio(
-                url,
-                codec,
-                browser_spec=session_browser_spec(),
-                cookie_file=session_cookies_file,
-                output_dir=music_dir,
-                sponsorblock=skip_sponsors,
-            )
+            download_audio_interactively(url, console)
 
         elif choice == "4":
             url = prompt_for_url(console)
-            sub_langs = Prompt.ask(
-                "Subtitle languages (comma-separated, e.g. 'en', 'ar', 'all')",
-                default="en",
-            )
-            auto_subs = Confirm.ask(
-                "Include auto-generated captions if official subtitles are missing?",
-                default=True,
-            )
-            sub_format = Prompt.ask(
-                "Subtitle format", choices=["srt", "vtt", "best"], default="srt"
-            )
-            video_dir = get_default_video_dir()
-            console.print(
-                f"[blue]Downloading subtitles ({sub_langs}) to [cyan]{video_dir}[/cyan]...[/blue]"
-            )
-            _ = report_subtitle_download(
-                url,
-                video_dir,
-                console,
-                langs=sub_langs,
-                auto_subs=auto_subs,
-                sub_format=sub_format,
-                browser_spec=session_browser_spec(),
-                cookie_file=session_cookies_file,
-            )
+            download_subtitles_interactively(url, console)
 
         elif choice == "5":
             info_file = Prompt.ask("Enter path to info.json file")

@@ -25,12 +25,12 @@ def test_downloads_dir_prefers_xdg_env(isolated_downloads_dir: Path) -> None:
 def test_downloads_dir_creates_missing_home_downloads(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The ~/Downloads fallback is created on demand."""
+    """The ~/Downloads fallback is resolved, not created."""
     monkeypatch.setenv("XDG_DOWNLOAD_DIR", "")
     target = isolated_home / "Downloads"
     assert not target.exists()
     assert get_default_downloads_dir() == target
-    assert target.is_dir()
+    assert not target.exists()
 
 
 def test_downloads_dir_ignores_nonexistent_xdg_path(
@@ -55,8 +55,15 @@ def test_music_and_video_dirs_nest_under_downloads(
 ) -> None:
     assert get_default_music_dir() == isolated_downloads_dir / "audio"
     assert get_default_video_dir() == isolated_downloads_dir / "video"
-    assert get_default_music_dir().is_dir()
-    assert get_default_video_dir().is_dir()
+
+
+def test_music_and_video_dir_resolvers_create_nothing(
+    isolated_downloads_dir: Path,
+) -> None:
+    """The resolvers stay pure so the menu can name the path without making it."""
+    assert not get_default_music_dir().exists()
+    assert not get_default_video_dir().exists()
+    assert list(isolated_downloads_dir.iterdir()) == []
 
 
 # --- Persisted settings -------------------------------------------------
