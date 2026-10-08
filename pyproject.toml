@@ -1,6 +1,6 @@
 [project]
 name = "ydlx"
-version = "0.5.1"
+version = "0.5.2"
 description = "An interactive, feature-rich CLI dashboard and downloader for yt-dlp"
 readme = "README.md"
 license = "GPL-3.0-or-later"
