@@ -94,7 +94,8 @@ def _report(
         if info_dict.get("_type") == "playlist":
             record.subtitle_count = int(
                 any(
-                    entry and (entry.get("subtitles") or entry.get("automatic_captions"))
+                    entry
+                    and (entry.get("subtitles") or entry.get("automatic_captions"))
                     for entry in info_dict.get("entries", [])
                 )
             )
@@ -135,9 +136,7 @@ def test_single_video_reports_partial_language_misses(
 def test_default_english_does_not_select_an_unrelated_track(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    code, output, pins = _report(
-        tmp_path, monkeypatch, {"subtitles": {"fr": [{}]}}
-    )
+    code, output, pins = _report(tmp_path, monkeypatch, {"subtitles": {"fr": [{}]}})
 
     assert code == 1
     assert pins == []
@@ -168,9 +167,7 @@ def test_playlist_keeps_one_legacy_global_language_option(
             {"title": "second", "subtitles": {"en": [{}]}},
         ],
     }
-    code, output, pins = _report(
-        tmp_path, monkeypatch, playlist, langs="en,ar"
-    )
+    code, output, pins = _report(tmp_path, monkeypatch, playlist, langs="en,ar")
 
     assert code == 0
     assert pins == [["en", "ar"]]
@@ -448,7 +445,9 @@ def test_preextracted_downloader_processes_the_same_info_dict(
         def __exit__(self, *_args: Any) -> None:
             return None
 
-        def process_ie_result(self, received_info: dict[str, Any], download: bool) -> None:
+        def process_ie_result(
+            self, received_info: dict[str, Any], download: bool
+        ) -> None:
             captured["info"] = received_info
             captured["download"] = download
             cast(DownloadRecord, captured["record"]).subtitle_count = 1

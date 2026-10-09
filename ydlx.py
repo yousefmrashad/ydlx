@@ -1599,7 +1599,7 @@ def report_subtitle_download(
     for language in unmatched:
         console.print(
             f"[yellow]⚠️  No track found for requested language '{language}'.[/yellow]"
-    )
+        )
     if not resolved:
         return _report_subtitle_count(0, langs, target_dir, console)
     return finish(info, resolved)
