@@ -1,15 +1,22 @@
 """Tests for the already-downloaded advisory and the hooks that feed it."""
 
 from io import StringIO
+from pathlib import Path
+from typing import Any
 
+import pytest
 from rich.console import Console
+from yt_dlp.utils import DownloadError
 
+import ydlx
 from ydlx import (
     ALREADY_DOWNLOADED_HINT,
     DownloadRecord,
     MyLogger,
     TrackingYoutubeDL,
     build_downloader,
+    download_video,
+    is_sponsorblock_embed_rerun,
     report_already_downloaded,
 )
 
@@ -148,6 +155,97 @@ def test_report_already_downloaded_keeps_first_seen_order() -> None:
     output = _capture(record)
 
     assert output.index("two.mp4") < output.index("one.mp4")
+
+
+def test_sponsorblock_embed_rerun_is_recognized_for_a_skipped_media_file() -> None:
+    record = DownloadRecord()
+    record.skipped = ["video.webm"]
+    opts = {
+        "postprocessors": [
+            {"key": "ModifyChapters"},
+            {"key": "FFmpegEmbedSubtitle"},
+        ]
+    }
+
+    assert is_sponsorblock_embed_rerun(
+        "Postprocessing: Cannot cut video since the real and expected durations mismatch. "
+        "Different chapters may have already been removed",
+        record,
+        opts,
+    )
+
+
+def test_sponsorblock_embed_rerun_requires_the_matching_error_and_postprocessors() -> (
+    None
+):
+    record = DownloadRecord()
+    record.skipped = ["video.webm"]
+    opts = {
+        "postprocessors": [
+            {"key": "ModifyChapters"},
+            {"key": "FFmpegEmbedSubtitle"},
+        ]
+    }
+
+    assert not is_sponsorblock_embed_rerun(
+        "some other postprocessing error", record, opts
+    )
+    assert not is_sponsorblock_embed_rerun(
+        "Cannot cut video since the real and expected durations mismatch",
+        DownloadRecord(),
+        opts,
+    )
+    assert not is_sponsorblock_embed_rerun(
+        "Cannot cut video since the real and expected durations mismatch",
+        record,
+        {"postprocessors": [{"key": "ModifyChapters"}]},
+    )
+
+
+def test_download_reports_actionable_warning_for_sponsorblock_embed_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    buffer = StringIO()
+
+    class FailedDownloader:
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def download(self, _urls: list[str]) -> int:
+            raise DownloadError(
+                "Postprocessing: Cannot cut video since the real and expected "
+                "durations mismatch. Different chapters may have already been removed"
+            )
+
+    monkeypatch.setattr(
+        ydlx, "Console", lambda *args, **kwargs: Console(file=buffer, width=200)
+    )
+    monkeypatch.setattr(
+        ydlx, "build_downloader", lambda _opts, _record: FailedDownloader()
+    )
+    record = DownloadRecord()
+    record.skipped = ["video.webm"]
+
+    result = download_video(
+        "https://youtu.be/example",
+        extra_opts={
+            "postprocessors": [
+                {"key": "ModifyChapters"},
+                {"key": "FFmpegEmbedSubtitle"},
+            ]
+        },
+        output_dir=tmp_path / "output",
+        record=record,
+    )
+
+    assert result == 1
+    assert (
+        "SponsorBlock could not cut this already-downloaded file" in buffer.getvalue()
+    )
+    assert "Delete it and retry" in buffer.getvalue()
 
 
 # --- Wiring the collector in ---------------------------------------------

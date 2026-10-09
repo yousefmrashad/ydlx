@@ -124,6 +124,23 @@ def test_configure_subtitles_embed_after_write_records_existing_file() -> None:
     assert embed["already_have_subtitle"] is True
 
 
+@pytest.mark.parametrize("sub_format", ["srt", "best"])
+def test_embedding_always_selects_and_converts_to_vtt(sub_format: str) -> None:
+    opts: dict[str, Any] = {}
+
+    configure_subtitles(
+        opts,
+        embed_subs=True,
+        sub_format=sub_format,
+    )
+
+    assert opts["subtitlesformat"] == "vtt"
+    convertor = next(
+        pp for pp in opts["postprocessors"] if pp["key"] == "FFmpegSubtitlesConvertor"
+    )
+    assert convertor["format"] == "vtt"
+
+
 # --- Sub-language pinning -------------------------------------------------
 # yt-dlp fullmatch-es subtitleslangs and only runs its own fallback chain when
 # the option is unset. Pinning "en" suppressed that chain, so a video whose only

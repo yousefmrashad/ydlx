@@ -774,6 +774,25 @@ def report_already_downloaded(record: DownloadRecord, console: Console) -> None:
     console.print(f"[yellow]⚠️  {ALREADY_DOWNLOADED_HINT}[/yellow]")
 
 
+SPONSORBLOCK_EMBED_RERUN_HINT = (
+    "SponsorBlock could not cut this already-downloaded file. Delete it and "
+    "retry to apply the cuts and embed subtitles."
+)
+
+
+def is_sponsorblock_embed_rerun(
+    message: str, record: DownloadRecord, opts: dict[str, Any]
+) -> bool:
+    """Whether a failed cut is the already-downloaded SponsorBlock/embed case."""
+    pp_keys = {pp.get("key") for pp in opts.get("postprocessors", [])}
+    return (
+        bool(record.skipped)
+        and "Cannot cut video since the real and expected durations mismatch" in message
+        and "ModifyChapters" in pp_keys
+        and "FFmpegEmbedSubtitle" in pp_keys
+    )
+
+
 # =====================================================================
 # URL Helpers
 # =====================================================================
@@ -957,9 +976,9 @@ def prompt_subtitle_options() -> SubtitleOptions:
         default="en",
     )
     sub_format = Prompt.ask(
-        "Subtitle format",
+        "Subtitle format (embedded subtitles always use vtt)",
         choices=list(SUBTITLE_FORMAT_CHOICES),
-        default="srt",
+        default=DEFAULT_SUB_FORMAT,
     )
     auto_subs = Confirm.ask(
         "Include auto-generated captions if official subtitles are missing?",
@@ -1119,6 +1138,8 @@ def download_video(
             report_already_downloaded(record, Console())
             return code
         report_failure(msg, Console(), "Download error")
+        if is_sponsorblock_embed_rerun(msg, record, extra_opts or {}):
+            Console().print(f"[yellow]💡 {SPONSORBLOCK_EMBED_RERUN_HINT}[/yellow]")
         return 1
     except Exception as e:
         report_failure(str(e), Console(), "Download error")
@@ -1195,6 +1216,7 @@ def download_from_info_json(
 
 
 DEFAULT_SUB_LANGS = "en"
+DEFAULT_SUB_FORMAT = "vtt"
 
 
 def parse_sub_langs(sub_langs: str) -> list[str]:
@@ -1282,11 +1304,16 @@ def configure_subtitles(
     embed_subs: bool = False,
     auto_subs: bool = False,
     sub_langs: str = "en",
-    sub_format: str = "srt",
+    sub_format: str = DEFAULT_SUB_FORMAT,
 ) -> None:
     """Configures subtitle download, conversion, and embedding options in ydl_opts."""
     if not (write_subs or embed_subs):
         return
+
+    # VTT is the interoperable format for embedding across the containers this
+    # app produces (including WebM). The user's selected format still applies
+    # to sidecar-only downloads; embedding always fetches/converts to VTT.
+    effective_sub_format = "vtt" if embed_subs else sub_format
 
     opts["writesubtitles"] = True
     if auto_subs:
@@ -1294,11 +1321,13 @@ def configure_subtitles(
 
     apply_sub_langs(opts, sub_langs)
 
-    # "srt" is (almost) never a native source format; pick the best native
-    # track and let the convertor below produce the .srt file.
-    opts["subtitlesformat"] = "best" if sub_format.lower() == "srt" else sub_format
+    # "srt" is rarely native; pick the best source and let the convertor below
+    # produce the requested format (or VTT when embedding).
+    opts["subtitlesformat"] = (
+        "best" if effective_sub_format.lower() == "srt" else effective_sub_format
+    )
 
-    convertor = make_subtitle_convertor(sub_format)
+    convertor = make_subtitle_convertor(effective_sub_format)
     if convertor:
         queue_postprocessors(opts, convertor)
 
@@ -1316,7 +1345,7 @@ def download_subtitles_only(
     url: str,
     sub_langs: str = "en",
     auto_subs: bool = True,
-    sub_format: str = "srt",
+    sub_format: str = DEFAULT_SUB_FORMAT,
     browser_spec: tuple[str, ...] | None = None,
     cookie_file: str | None = None,
     output_dir: str | Path | None = None,
@@ -1864,7 +1893,7 @@ def run_interactive_menu() -> None:
         )
         menu_table.add_row(
             "[bold yellow]4.[/bold yellow] 💬 Download Subtitles Only",
-            "[yellow]Extract subtitles (.srt) without downloading media[/yellow]",
+            "[yellow]Extract subtitles (.vtt) without downloading media[/yellow]",
         )
         menu_table.add_row(
             "[bold bright_yellow]5.[/bold bright_yellow] 📄 Download from info.json",
@@ -2260,14 +2289,14 @@ def download(
         Option(
             "--subs",
             "-S",
-            help="Download subtitles file (.srt) alongside the video",
+            help="Save subtitles as separate files alongside the video",
         ),
     ] = False,
     embed_subs: Annotated[
         bool,
         Option(
             "--embed-subs",
-            help="Embed subtitles directly into the video container",
+            help="Embed subtitles inside the video file (no separate files unless -S is also passed)",
         ),
     ] = False,
     auto_subs: Annotated[
@@ -2289,9 +2318,9 @@ def download(
         str,
         Option(
             "--sub-format",
-            help="Preferred subtitle format (srt, vtt, best)",
+            help="Sidecar format (srt, vtt, best); embedded subtitles always use vtt",
         ),
-    ] = "srt",
+    ] = DEFAULT_SUB_FORMAT,
     verbose: Annotated[
         bool, Option("--verbose", "-v", help="Show verbose output")
     ] = False,
@@ -2495,8 +2524,12 @@ def subs(
     ] = True,
     sub_format: Annotated[
         str,
-        Option("--sub-format", "-f", help="Subtitle format (srt, vtt, best)"),
-    ] = "srt",
+        Option(
+            "--sub-format",
+            "-f",
+            help="Sidecar format (srt, vtt, best); embedded subtitles always use vtt",
+        ),
+    ] = DEFAULT_SUB_FORMAT,
     cookies_from_browser: Annotated[
         str | None,
         Option("--cookies-from-browser", "-b", help=BROWSER_OPTION_HELP),
