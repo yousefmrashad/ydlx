@@ -104,6 +104,11 @@ def _run(
         record.subtitle_count = count
         return 0
 
+    monkeypatch.setattr(
+        ydlx,
+        "get_video_info",
+        lambda *_args, **_kwargs: {"subtitles": {"en": [{}]}},
+    )
     monkeypatch.setattr(ydlx, "download_subtitles_only", fake_download)
 
     buffer = StringIO()
@@ -180,6 +185,11 @@ def test_a_failed_download_is_reported_before_the_count(
     def fake_download(*args: Any, **kwargs: Any) -> int:
         return 1
 
+    monkeypatch.setattr(
+        ydlx,
+        "get_video_info",
+        lambda *_args, **_kwargs: {"subtitles": {"en": [{}]}},
+    )
     monkeypatch.setattr(ydlx, "download_subtitles_only", fake_download)
     buffer = StringIO()
     code = report_subtitle_download(

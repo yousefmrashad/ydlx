@@ -2,7 +2,7 @@ import json
 import os
 import re
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, NamedTuple, cast
@@ -972,7 +972,7 @@ def prompt_subtitle_options() -> SubtitleOptions:
     wording from drifting too.
     """
     langs = Prompt.ask(
-        "Subtitle languages (comma-separated, e.g. 'en', 'ar', 'all')",
+        "Subtitle languages (comma-separated, e.g. 'en', 'pt-BR', 'all')",
         default="en",
     )
     sub_format = Prompt.ask(
@@ -1221,9 +1221,62 @@ DEFAULT_SUB_FORMAT = "vtt"
 
 def parse_sub_langs(sub_langs: str) -> list[str]:
     """Splits the comma-separated --sub-langs value, defaulting to English."""
-    return [lang.strip() for lang in sub_langs.split(",") if lang.strip()] or [
-        DEFAULT_SUB_LANGS
-    ]
+    langs = [lang.strip() for lang in sub_langs.split(",") if lang.strip()]
+    # Language requests are case-insensitive. Keep the first spelling so legacy
+    # patterns and yt-dlp aliases remain otherwise untouched.
+    unique: dict[str, str] = {}
+    for lang in langs:
+        unique.setdefault(lang.casefold(), lang)
+    return list(unique.values()) or [DEFAULT_SUB_LANGS]
+
+
+def resolvable_sub_langs(tokens: list[str]) -> list[str] | None:
+    """Return ordinary BCP 47-style language tags, or None for legacy syntax."""
+    if any(token.casefold() == "all" for token in tokens):
+        return None
+    pattern = r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*"
+    if all(re.fullmatch(pattern, token, flags=re.ASCII) for token in tokens):
+        return tokens
+    return None
+
+
+def resolve_sub_langs(
+    requested: list[str],
+    official: Mapping[str, Any],
+    automatic: Mapping[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Resolve one official-first concrete track key per requested language."""
+    resolved: list[str] = []
+    unmatched: list[str] = []
+    resolved_keys: set[str] = set()
+
+    def find_exact(tracks: Mapping[str, Any], language: str) -> str | None:
+        return next(
+            (key for key in tracks if key.casefold() == language),
+            None,
+        )
+
+    def find_prefix(tracks: Mapping[str, Any], language: str) -> str | None:
+        return next(
+            (key for key in tracks if key.casefold().startswith(language)),
+            None,
+        )
+
+    for requested_lang in requested:
+        language = requested_lang.casefold()
+        selected = (
+            find_exact(official, language)
+            or find_prefix(official, language)
+            or find_exact(automatic, language)
+            or find_prefix(automatic, language)
+        )
+        if selected is None:
+            unmatched.append(requested_lang)
+        elif selected not in resolved_keys:
+            resolved.append(selected)
+            resolved_keys.add(selected)
+
+    return resolved, unmatched
 
 
 def requested_sub_langs(sub_langs: str) -> list[str] | None:
@@ -1305,6 +1358,7 @@ def configure_subtitles(
     auto_subs: bool = False,
     sub_langs: str = "en",
     sub_format: str = DEFAULT_SUB_FORMAT,
+    pin_sub_langs: list[str] | None = None,
 ) -> None:
     """Configures subtitle download, conversion, and embedding options in ydl_opts."""
     if not (write_subs or embed_subs):
@@ -1319,7 +1373,10 @@ def configure_subtitles(
     if auto_subs:
         opts["writeautomaticsub"] = True
 
-    apply_sub_langs(opts, sub_langs)
+    if pin_sub_langs is None:
+        apply_sub_langs(opts, sub_langs)
+    else:
+        opts["subtitleslangs"] = list(pin_sub_langs)
 
     # "srt" is rarely native; pick the best source and let the convertor below
     # produce the requested format (or VTT when embedding).
@@ -1351,41 +1408,58 @@ def download_subtitles_only(
     output_dir: str | Path | None = None,
     verbose: bool = False,
     record: DownloadRecord | None = None,
+    pin_sub_langs: list[str] | None = None,
+    info: dict[str, Any] | None = None,
 ) -> int:
-    """Download subtitles only without downloading the media."""
+    """Download subtitles from a URL, or reuse metadata already extracted."""
     target_dir = Path(output_dir) if output_dir else get_default_video_dir()
-    target_dir.mkdir(parents=True, exist_ok=True)
-
-    opts: dict[str, Any] = {
-        "skip_download": True,
-        "writesubtitles": True,
-    }
-    if auto_subs:
-        opts["writeautomaticsub"] = True
-
-    apply_sub_langs(opts, sub_langs)
-    # "srt" is (almost) never a native source format; pick the best native
-    # track and let the convertor below produce the .srt file.
-    opts["subtitlesformat"] = "best" if sub_format.lower() == "srt" else sub_format
-    # A single failed language track (e.g. HTTP 429 rate limit) must not abort
-    # the whole run; yt-dlp then reports it as a warning and keeps going.
-    opts["ignoreerrors"] = True
-
-    # Only convert when the target format is a convertible subtitle container;
-    # anything else (e.g. "best") saves files in their native extracted format.
-    convertor = make_subtitle_convertor(sub_format)
-    if convertor:
-        queue_postprocessors(opts, convertor)
-
-    return download_video(
-        url,
-        extra_opts=opts,
-        browser_spec=browser_spec,
-        cookie_file=cookie_file,
-        output_dir=target_dir,
-        verbose=verbose,
-        record=record,
+    opts: dict[str, Any] = {"skip_download": True, "ignoreerrors": True}
+    configure_subtitles(
+        opts,
+        write_subs=True,
+        auto_subs=auto_subs,
+        sub_langs=sub_langs,
+        sub_format=sub_format,
+        pin_sub_langs=pin_sub_langs,
     )
+    if info is None:
+        return download_video(
+            url,
+            extra_opts=opts,
+            browser_spec=browser_spec,
+            cookie_file=cookie_file,
+            output_dir=target_dir,
+            verbose=verbose,
+            record=record,
+        )
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    ydl_opts = make_download_opts(target_dir, verbose)
+    apply_cookie_opts(ydl_opts, browser_spec, cookie_file)
+    ydl_opts.update(opts)
+    if record is None:
+        record = DownloadRecord()
+    try:
+        with build_downloader(ydl_opts, record) as ydl:
+            ydl.process_ie_result(info, download=True)
+    except Exception as error:
+        # Retry through yt-dlp's URL path if it cannot reprocess the info dict.
+        if retry_url := info.get("webpage_url") or info.get("original_url"):
+            return download_subtitles_only(
+                str(retry_url),
+                sub_langs=sub_langs,
+                auto_subs=auto_subs,
+                sub_format=sub_format,
+                browser_spec=browser_spec,
+                cookie_file=cookie_file,
+                output_dir=target_dir,
+                verbose=verbose,
+                record=record,
+                pin_sub_langs=pin_sub_langs,
+            )
+        report_failure(str(error), Console(), "Subtitle download error")
+        return 1
+    return 0
 
 
 def report_subtitle_download(
@@ -1399,27 +1473,68 @@ def report_subtitle_download(
     browser_spec: tuple[str, ...] | None,
     cookie_file: str | None = None,
     verbose: bool = False,
+    info: dict[str, Any] | None = None,
 ) -> int:
     """Download subtitles and report how many files landed; returns an exit code."""
-    record = DownloadRecord()
-    error_code = download_subtitles_only(
-        url,
-        sub_langs=langs,
-        auto_subs=auto_subs,
-        sub_format=sub_format,
-        browser_spec=browser_spec,
-        cookie_file=cookie_file,
-        output_dir=target_dir,
-        verbose=verbose,
-        record=record,
+    requested = parse_sub_langs(langs)
+    resolvable = resolvable_sub_langs(requested)
+
+    def finish(
+        info_dict: dict[str, Any] | None, pin_sub_langs: list[str] | None = None
+    ) -> int:
+        record = DownloadRecord()
+        error_code = download_subtitles_only(
+            url,
+            sub_langs=langs,
+            auto_subs=auto_subs,
+            sub_format=sub_format,
+            browser_spec=browser_spec,
+            cookie_file=cookie_file,
+            output_dir=target_dir,
+            verbose=verbose,
+            record=record,
+            pin_sub_langs=pin_sub_langs,
+            info=info_dict,
+        )
+        if error_code:
+            console.print("[bold red]❌ Subtitles download failed![/bold red]")
+            return error_code
+        return _report_subtitle_count(record.subtitle_count, langs, target_dir, console)
+
+    if resolvable is None:
+        # Keep aliases, negations, and yt-dlp regex syntax on the legacy path.
+        return finish(info)
+
+    if info is None:
+        try:
+            info = get_video_info(url, browser_spec, cookie_file, verbose)
+        except Exception as error:
+            report_failure(f"Extraction failed: {error}", console, "Subtitle error")
+            console.print("[bold red]❌ Subtitles download failed![/bold red]")
+            return 1
+
+    if info.get("_type") == "playlist" or "entries" in info:
+        # Playlists retain yt-dlp's one-global-option behavior.
+        return finish(info)
+
+    resolved, unmatched = resolve_sub_langs(
+        resolvable,
+        info.get("subtitles") or {},
+        (info.get("automatic_captions") or {}) if auto_subs else {},
     )
-    if error_code:
-        console.print("[bold red]❌ Subtitles download failed![/bold red]")
-        return error_code
-    # Counted from the tracks yt-dlp resolved, not from the directory. A re-run
-    # rewrites the same filenames, so diffing the directory showed no new files
-    # and reported failure for a download that had in fact succeeded.
-    written = record.subtitle_count
+    for language in unmatched:
+        console.print(
+            f"[yellow]⚠️  No track found for requested language '{language}'.[/yellow]"
+    )
+    if not resolved:
+        return _report_subtitle_count(0, langs, target_dir, console)
+    return finish(info, resolved)
+
+
+def _report_subtitle_count(
+    written: int, langs: str, target_dir: Path, console: Console
+) -> int:
+    """Report success or the existing no-subtitles failure for one run."""
     if not written:
         console.print(
             f"[bold red]❌ No subtitles found for '{langs}' on this video.[/bold red]"
@@ -1809,7 +1924,9 @@ def do_download_interactive(
         console.print("[bold green]✓ Download completed successfully![/bold green]")
 
 
-def download_subtitles_interactively(url: str, console: Console) -> None:
+def download_subtitles_interactively(
+    url: str, console: Console, info: dict[str, Any] | None = None
+) -> None:
     """Asks for subtitle options and downloads them into the video directory."""
     options = prompt_subtitle_options()
     video_dir = get_default_video_dir()
@@ -1825,6 +1942,7 @@ def download_subtitles_interactively(url: str, console: Console) -> None:
         sub_format=options.sub_format,
         browser_spec=session_browser_spec(),
         cookie_file=session_cookies_file,
+        info=info,
     )
 
 
@@ -1964,7 +2082,7 @@ def run_interactive_menu() -> None:
             elif sub_choice == "2":
                 do_download_interactive(url, info, console)
             elif sub_choice == "3":
-                download_subtitles_interactively(url, console)
+                download_subtitles_interactively(url, console, info)
             elif sub_choice == "4":
                 download_audio_interactively(url, console)
 
@@ -2311,7 +2429,7 @@ def download(
         Option(
             "--sub-langs",
             "-l",
-            help="Comma-separated subtitle languages (e.g. 'en', 'ar', 'all')",
+            help="Comma-separated subtitle languages (e.g. 'en', 'pt-BR', 'all')",
         ),
     ] = "en",
     sub_format: Annotated[
@@ -2512,7 +2630,7 @@ def subs(
         Option(
             "--sub-langs",
             "-l",
-            help="Comma-separated subtitle languages (e.g. 'en', 'ar', 'all')",
+            help="Comma-separated subtitle languages (e.g. 'en', 'pt-BR', 'all')",
         ),
     ] = "en",
     auto_subs: Annotated[

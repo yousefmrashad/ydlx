@@ -180,6 +180,17 @@ def test_configure_subtitles_pins_a_multi_language_request() -> None:
     assert opts["subtitleslangs"] == ["en", "ar"]
 
 
+def test_configure_subtitles_accepts_resolved_track_keys() -> None:
+    opts: dict[str, Any] = {}
+    configure_subtitles(
+        opts,
+        write_subs=True,
+        sub_langs="en",
+        pin_sub_langs=["en-US"],
+    )
+    assert opts["subtitleslangs"] == ["en-US"]
+
+
 def test_yt_dlp_fallback_finds_the_asr_suffixed_official_track() -> None:
     """The bug that started this: "en" pinned would have matched nothing here.
 
