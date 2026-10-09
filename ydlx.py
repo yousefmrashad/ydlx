@@ -1095,8 +1095,9 @@ def download_video(
     output_dir: str | Path | None = None,
     verbose: bool = False,
     record: DownloadRecord | None = None,
+    info: dict[str, Any] | None = None,
 ) -> int:
-    """Download a video with optional custom configurations.
+    """Download a URL or extracted video info with optional configurations.
 
     A caller that needs to know what yt-dlp did passes a record and keeps it:
     the one built here is written to by the downloader and then discarded, so
@@ -1116,7 +1117,11 @@ def download_video(
 
     try:
         with build_downloader(ydl_opts, record) as ydl:
-            code = int(ydl.download([url]))
+            if info is None:
+                code = int(ydl.download([url]))
+            else:
+                ydl.process_ie_result(info, download=True)
+                code = 0
     except DownloadError as e:
         msg = strip_ansi(str(e))
         if "Unable to download video subtitles" in msg and (
@@ -1132,6 +1137,8 @@ def download_video(
             }
             retry_opts["progress_hooks"] = [DownloadTracker().hook]
             with build_downloader(retry_opts, record) as ydl:
+                # Re-extract on this exceptional retry path so the failed
+                # subtitle attempt cannot leave stale state in the info dict.
                 code = int(ydl.download([url]))
             # The retry shares the record, so the files the first attempt
             # skipped are in it too; reporting dedupes.
@@ -1396,6 +1403,56 @@ def configure_subtitles(
                 "already_have_subtitle": write_subs,
             },
         )
+
+
+def configure_requested_subtitles(
+    opts: dict[str, Any],
+    info: dict[str, Any] | None,
+    console: Console,
+    *,
+    language_tokens: list[str] | None,
+    write_subs: bool,
+    embed_subs: bool,
+    auto_subs: bool,
+    sub_langs: str,
+    sub_format: str,
+) -> None:
+    """Configure subtitles, resolving language tags for single-video metadata."""
+    if not (write_subs or embed_subs):
+        return
+
+    pin_sub_langs: list[str] | None = None
+    is_playlist = bool(info and (info.get("_type") == "playlist" or "entries" in info))
+    if language_tokens is not None and not is_playlist:
+        if info is None:
+            console.print(
+                "[yellow]⚠️  Subtitle languages could not be resolved; skipping subtitles.[/yellow]"
+            )
+            return
+        pin_sub_langs, unmatched = resolve_sub_langs(
+            language_tokens,
+            info.get("subtitles") or {},
+            (info.get("automatic_captions") or {}) if auto_subs else {},
+        )
+        for language in unmatched:
+            console.print(
+                f"[yellow]⚠️  No track found for requested language '{language}'.[/yellow]"
+            )
+        if not pin_sub_langs:
+            console.print(
+                "[yellow]⚠️  Continuing without subtitles because no requested language matched.[/yellow]"
+            )
+            return
+
+    configure_subtitles(
+        opts,
+        write_subs=write_subs,
+        embed_subs=embed_subs,
+        auto_subs=auto_subs,
+        sub_langs=sub_langs,
+        sub_format=sub_format,
+        pin_sub_langs=pin_sub_langs,
+    )
 
 
 def download_subtitles_only(
@@ -1901,8 +1958,12 @@ def do_download_interactive(
             default="embed",
         )
         subs = prompt_subtitle_options()
-        configure_subtitles(
+        language_tokens = resolvable_sub_langs(parse_sub_langs(subs.langs))
+        configure_requested_subtitles(
             opts,
+            info,
+            console,
+            language_tokens=language_tokens,
             write_subs=(sub_mode in ("external", "both")),
             embed_subs=(sub_mode in ("embed", "both")),
             auto_subs=subs.auto_subs,
@@ -1917,6 +1978,7 @@ def do_download_interactive(
         browser_spec=session_browser_spec(),
         cookie_file=session_cookies_file,
         output_dir=target_dir,
+        info=info,
     )
     if error_code:
         console.print("[bold red]❌ Download failed![/bold red]")
@@ -2475,8 +2537,12 @@ def download(
     )
 
     target_dir: Path = Path(output_dir) if output_dir else get_default_video_dir()
+    if info_json and not os.path.exists(info_json):
+        console.print(f"[bold red]Error: File not found: {info_json}[/bold red]")
+        raise typer.Exit(code=1)
 
     opts: dict[str, Any] = {}
+    download_info: dict[str, Any] | None = None
 
     # Setup formats
     if format_code:
@@ -2497,8 +2563,36 @@ def download(
 
     # Setup Subtitles
     if write_subs or embed_subs:
-        configure_subtitles(
+        language_tokens = resolvable_sub_langs(parse_sub_langs(sub_langs))
+        if language_tokens is not None:
+            if info_json:
+                try:
+                    with open(info_json, encoding="utf-8") as info_file:
+                        loaded_info = json.load(info_file)
+                    if isinstance(loaded_info, dict):
+                        download_info = loaded_info
+                except (OSError, json.JSONDecodeError) as error:
+                    report_failure(str(error), console, "Subtitle metadata error")
+            elif url:
+                try:
+                    download_info = get_video_info(
+                        url,
+                        browser_spec=browser_spec,
+                        cookie_file=cookies,
+                        verbose=verbose,
+                    )
+                except Exception as error:
+                    report_failure(
+                        f"Could not inspect subtitle tracks: {error}",
+                        console,
+                        "Subtitle metadata error",
+                    )
+
+        configure_requested_subtitles(
             opts,
+            download_info,
+            console,
+            language_tokens=language_tokens,
             write_subs=write_subs,
             embed_subs=embed_subs,
             auto_subs=auto_subs,
@@ -2508,9 +2602,6 @@ def download(
 
     # Perform download
     if info_json:
-        if not os.path.exists(info_json):
-            console.print(f"[bold red]Error: File not found: {info_json}[/bold red]")
-            raise typer.Exit(code=1)
         console.print(
             f"[blue]Starting download to [cyan]{target_dir}[/cyan] using info file: [cyan]{info_json}[/cyan][/blue]"
         )
@@ -2536,6 +2627,7 @@ def download(
             cookie_file=cookies,
             output_dir=target_dir,
             verbose=verbose,
+            info=download_info,
         )
 
     if error_code:

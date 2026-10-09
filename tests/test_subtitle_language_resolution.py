@@ -184,6 +184,163 @@ def test_playlist_default_leaves_selection_to_ytdlp(
     assert "Downloaded 1 subtitle file(s)" in output
 
 
+def test_combined_download_resolves_a_single_video_before_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    info = {
+        "id": "video",
+        "subtitles": {"ar-SA": [{}]},
+        "automatic_captions": {"ar": [{}]},
+    }
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(ydlx, "get_video_info", lambda *_args, **_kwargs: info)
+
+    def fake_download(url: str, **kwargs: Any) -> int:
+        captured["url"] = url
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(ydlx, "download_video", fake_download)
+
+    ydlx.download(
+        url="https://youtu.be/test",
+        output_dir=str(tmp_path),
+        write_subs=True,
+        sub_langs="ar",
+    )
+
+    assert captured["info"] is info
+    assert captured["extra_opts"]["subtitleslangs"] == ["ar-SA"]
+
+
+def test_combined_download_skips_unmatched_subtitles_but_downloads_media(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    info = {"id": "video", "subtitles": {"fr": [{}]}}
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(ydlx, "get_video_info", lambda *_args, **_kwargs: info)
+    monkeypatch.setattr(
+        ydlx,
+        "download_video",
+        lambda _url, **kwargs: captured.update(kwargs) or 0,
+    )
+
+    ydlx.download(
+        url="https://youtu.be/test",
+        output_dir=str(tmp_path),
+        write_subs=True,
+        sub_langs="ar",
+    )
+
+    assert captured["info"] is info
+    assert "writesubtitles" not in captured["extra_opts"]
+    assert "subtitleslangs" not in captured["extra_opts"]
+
+
+def test_combined_playlist_keeps_one_global_language_option(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    info = {
+        "_type": "playlist",
+        "entries": [
+            {"subtitles": {"ar-SA": [{}]}},
+            {"subtitles": {"ar": [{}]}},
+        ],
+    }
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(ydlx, "get_video_info", lambda *_args, **_kwargs: info)
+    monkeypatch.setattr(
+        ydlx,
+        "download_video",
+        lambda _url, **kwargs: captured.update(kwargs) or 0,
+    )
+
+    ydlx.download(
+        url="https://youtu.be/playlist",
+        output_dir=str(tmp_path),
+        write_subs=True,
+        sub_langs="ar",
+    )
+
+    assert captured["info"] is info
+    assert captured["extra_opts"]["subtitleslangs"] == ["ar"]
+
+
+def test_interactive_combined_download_resolves_against_existing_info(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    info = {"id": "video", "subtitles": {"ar-SA": [{}]}}
+    captured: dict[str, Any] = {}
+    confirm_calls = 0
+
+    def prompt_ask(message: str, **_kwargs: Any) -> str:
+        if message == "Select download type":
+            return "1"
+        return "external"
+
+    def confirm_ask(*_args: Any, **_kwargs: Any) -> bool:
+        nonlocal confirm_calls
+        confirm_calls += 1
+        return confirm_calls == 2
+
+    monkeypatch.setattr(ydlx.Prompt, "ask", prompt_ask)
+    monkeypatch.setattr(ydlx.Confirm, "ask", confirm_ask)
+    monkeypatch.setattr(
+        ydlx,
+        "prompt_subtitle_options",
+        lambda: ydlx.SubtitleOptions("ar", "vtt", True),
+    )
+    monkeypatch.setattr(ydlx, "get_default_video_dir", lambda: tmp_path)
+
+    def fake_download(url: str, **kwargs: Any) -> int:
+        captured["url"] = url
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(ydlx, "download_video", fake_download)
+    ydlx.do_download_interactive(
+        "https://youtu.be/test", info, Console(file=StringIO())
+    )
+
+    assert confirm_calls == 2
+    assert captured["info"] is info
+    assert captured["extra_opts"]["subtitleslangs"] == ["ar-SA"]
+
+
+def test_media_downloader_processes_preextracted_info(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    info = {"id": "video"}
+    received: list[dict[str, Any]] = []
+
+    class FakeDownloader:
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def process_ie_result(self, result: dict[str, Any], download: bool) -> None:
+            assert download is True
+            received.append(result)
+
+        def download(self, _urls: list[str]) -> int:
+            pytest.fail("pre-extracted info should not trigger a second extraction")
+
+    monkeypatch.setattr(ydlx, "make_download_opts", lambda *_args: {})
+    monkeypatch.setattr(ydlx, "apply_cookie_opts", lambda *_args: None)
+    monkeypatch.setattr(ydlx, "build_downloader", lambda *_args: FakeDownloader())
+
+    code = ydlx.download_video(
+        "https://youtu.be/video",
+        output_dir=tmp_path,
+        info=info,
+    )
+
+    assert code == 0
+    assert received == [info]
+
+
 def test_bypass_tokens_use_legacy_url_path_without_pre_extraction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
