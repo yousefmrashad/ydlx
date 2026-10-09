@@ -1271,12 +1271,29 @@ def resolve_sub_langs(
 
     for requested_lang in requested:
         language = requested_lang.casefold()
-        selected = (
-            find_exact(official, language)
-            or find_prefix(official, language)
-            or find_exact(automatic, language)
-            or find_prefix(automatic, language)
-        )
+        subtags = language.split("-")
+        base_languages = [
+            "-".join(subtags[:length]) for length in range(len(subtags) - 1, 0, -1)
+        ]
+        selected = find_exact(official, language) or find_prefix(official, language)
+        if selected is None:
+            selected = next(
+                (key for base in base_languages if (key := find_exact(official, base))),
+                None,
+            )
+        if selected is None:
+            selected = find_exact(automatic, language) or find_prefix(
+                automatic, language
+            )
+        if selected is None:
+            selected = next(
+                (
+                    key
+                    for base in base_languages
+                    if (key := find_exact(automatic, base))
+                ),
+                None,
+            )
         if selected is None:
             unmatched.append(requested_lang)
         elif selected not in resolved_keys:
