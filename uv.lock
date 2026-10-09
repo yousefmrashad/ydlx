@@ -334,7 +334,7 @@ wheels = [
 
 [[package]]
 name = "ydlx"
-version = "0.5.4"
+version = "0.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "curl-cffi" },
