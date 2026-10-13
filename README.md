@@ -9,6 +9,8 @@ A modern, fast, interactive CLI dashboard and downloader built on top of [yt-dlp
 
 **ydlx** eliminates complex parameter strings and brings an intuitive interactive menu, universal codec compatibility presets, automated SponsorBlock skipping, browser cookie integration, and smart platform-agnostic output organization.
 
+<img src="https://raw.githubusercontent.com/yousefmrashad/ydlx/master/docs/dashboard.png" alt="ydlx Interactive Dashboard" width="650">
+
 ---
 
 ## ✨ Features
