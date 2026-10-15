@@ -2,9 +2,13 @@
 
 import pytest
 import typer
+from rich.console import Console
 
-import ydlx
-from ydlx import _video_codec_label, normalize_url, parse_cli_url, prompt_for_url
+from ydlx import prompts, urls
+from ydlx.errors import strip_ansi
+from ydlx.formats import _video_codec_label
+from ydlx.prompts import prompt_for_max_height
+from ydlx.urls import normalize_url, parse_cli_url, prompt_for_url
 
 
 @pytest.mark.parametrize(
@@ -55,7 +59,7 @@ def test_parse_cli_url_exits_on_invalid_input() -> None:
 def _scripted_prompt(monkeypatch: pytest.MonkeyPatch, *answers: str) -> None:
     """Feeds canned answers to Prompt.ask in order."""
     pending = list(answers)
-    monkeypatch.setattr(ydlx.Prompt, "ask", lambda *_args, **_kwargs: pending.pop(0))
+    monkeypatch.setattr(urls.Prompt, "ask", lambda *_args, **_kwargs: pending.pop(0))
 
 
 @pytest.mark.parametrize("word", ["back", "Back", "  BACK  ", "q", "Q"])
@@ -63,21 +67,21 @@ def test_prompt_for_url_returns_none_on_back(
     monkeypatch: pytest.MonkeyPatch, word: str
 ) -> None:
     _scripted_prompt(monkeypatch, word)
-    assert prompt_for_url(ydlx.Console()) is None
+    assert prompt_for_url(Console()) is None
 
 
 def test_prompt_for_url_returns_normalized_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _scripted_prompt(monkeypatch, "youtu.be/abc")
-    assert prompt_for_url(ydlx.Console()) == "https://youtu.be/abc"
+    assert prompt_for_url(Console()) == "https://youtu.be/abc"
 
 
 def test_prompt_for_url_retries_invalid_input_then_accepts(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _scripted_prompt(monkeypatch, "nonsense", "youtu.be/abc")
-    assert prompt_for_url(ydlx.Console()) == "https://youtu.be/abc"
+    assert prompt_for_url(Console()) == "https://youtu.be/abc"
     assert "invalid URL" in capsys.readouterr().out
 
 
@@ -85,7 +89,7 @@ def test_prompt_for_url_back_after_invalid_input(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _scripted_prompt(monkeypatch, "nonsense", "back")
-    assert prompt_for_url(ydlx.Console()) is None
+    assert prompt_for_url(Console()) is None
 
 
 @pytest.mark.parametrize(
@@ -109,11 +113,11 @@ def test_video_codec_label(vcodec: str, expected: str) -> None:
 
 
 def test_strip_ansi_removes_escape_sequences() -> None:
-    assert ydlx.strip_ansi("\x1b[1;31mERROR\x1b[0m: boom") == "ERROR: boom"
+    assert strip_ansi("\x1b[1;31mERROR\x1b[0m: boom") == "ERROR: boom"
 
 
 def test_strip_ansi_leaves_plain_text_untouched() -> None:
-    assert ydlx.strip_ansi("plain text") == "plain text"
+    assert strip_ansi("plain text") == "plain text"
 
 
 # --- Resolution prompt ---------------------------------------------------
@@ -128,7 +132,7 @@ def answer_prompts(monkeypatch: pytest.MonkeyPatch, responses: list[str]) -> lis
         asked.append(prompt)
         return queue.pop(0)
 
-    monkeypatch.setattr(ydlx.Prompt, "ask", fake_ask, raising=False)
+    monkeypatch.setattr(prompts.Prompt, "ask", fake_ask, raising=False)
     return asked
 
 
@@ -151,7 +155,7 @@ def test_prompt_for_max_height_accepts_common_input(
 ) -> None:
     """The prompt suggests the "p" suffix, so it must also accept it."""
     answer_prompts(monkeypatch, [raw])
-    assert ydlx.prompt_for_max_height(ydlx.Console()) == expected
+    assert prompt_for_max_height(Console()) == expected
 
 
 @pytest.mark.parametrize("bad", ["abc", "-5", "1080i", "720pp", "1,080"])
@@ -159,7 +163,7 @@ def test_prompt_for_max_height_reprompts_on_bad_input(
     bad: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     asked = answer_prompts(monkeypatch, [bad, "480p"])
-    assert ydlx.prompt_for_max_height(ydlx.Console()) == 480
+    assert prompt_for_max_height(Console()) == 480
     assert len(asked) == 2
 
 
@@ -167,10 +171,10 @@ def test_prompt_for_max_height_suggests_common_heights(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Non-technical users need the common values spelled out."""
-    console = ydlx.Console()
-    monkeypatch.setattr(ydlx.Prompt, "ask", lambda self, p="", **k: "0")
+    console = Console()
+    monkeypatch.setattr(prompts.Prompt, "ask", lambda self, p="", **k: "0")
     with console.capture() as capture:
-        ydlx.prompt_for_max_height(console)
+        prompt_for_max_height(console)
     output = capture.get()
     assert "720p" in output
     assert "1080p" in output

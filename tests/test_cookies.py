@@ -9,30 +9,37 @@ from typing import Any, cast
 import pytest
 import typer
 import yt_dlp
+from rich.console import Console
 from yt_dlp.cookies import CHROMIUM_BASED_BROWSERS, YoutubeDLCookieJar
 from yt_dlp.utils import DownloadError
 
-import ydlx
-from ydlx import (
+from ydlx.cookies import (
     CHROMIUM_BROWSER,
     CUSTOM_BASE_CHOICES,
     GECKO_BROWSER,
     SUPPORTED_BROWSERS,
     apply_cookie_opts,
     cookie_browser_error,
-    cookie_failure_hint,
     cookie_source_choice,
     format_cookie_file,
     format_cookie_source,
-    get_saved_cookie_file,
     is_profile_path,
     normalize_profile_arg,
     parse_browser_spec,
     parse_cookie_file,
     parse_cookies_from_browser,
     profile_arg_help,
-    save_settings,
 )
+from ydlx.errors import (
+    MyLogger,
+    _logger_reported,
+    collapse_error_prefixes,
+    cookie_failure_hint,
+    report_failure,
+)
+from ydlx.info import get_video_info
+from ydlx.opts import make_extract_opts
+from ydlx.settings import get_saved_cookie_file, save_settings
 
 # A minimal but valid cookies.txt: one plain cookie, one HttpOnly cookie, and
 # one session cookie (expires=0). All values are fake; this exercises parsing
@@ -581,8 +588,8 @@ def test_report_failure_shows_guidance_instead_of_raw_error(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """yt-dlp's duplicated DPAPI line is suppressed; the fix is shown instead."""
-    console = ydlx.Console()
-    ydlx.report_failure(
+    console = Console()
+    report_failure(
         "ERROR: ERROR: ERROR: Failed to decrypt with DPAPI. See "
         "https://github.com/yt-dlp/yt-dlp/issues/10927 for more info",
         console,
@@ -622,7 +629,7 @@ def test_logger_reports_the_raw_cookie_error(
     Suppressing it here meant an unrelated error whose text merely contained a
     keyword was replaced by cookie advice and the cause was lost entirely.
     """
-    ydlx.MyLogger(verbose=True).error(
+    MyLogger(verbose=True).error(
         "ERROR: Failed to decrypt with DPAPI. See https://example.invalid for more info"
     )
     assert "Failed to decrypt with DPAPI" in capsys.readouterr().out
@@ -636,7 +643,7 @@ def test_logger_repeats_an_identical_error_only_once(
     Confirmed against the real cookiejar path, which calls report_error once
     from trouble() and again from the cookiejar property with the chained cause.
     """
-    logger = ydlx.MyLogger(verbose=True)
+    logger = MyLogger(verbose=True)
     msg = "ERROR: Failed to decrypt with DPAPI. See https://example.invalid"
     logger.error(msg)
     logger.error(msg)
@@ -647,7 +654,7 @@ def test_logger_still_distinguishes_different_errors(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Dedup must key on the message, not blanket-suppress later errors."""
-    logger = ydlx.MyLogger(verbose=True)
+    logger = MyLogger(verbose=True)
     logger.error("ERROR: first failure")
     logger.error("ERROR: second failure")
     out = capsys.readouterr().out
@@ -658,7 +665,7 @@ def test_logger_still_distinguishes_different_errors(
 def test_logger_still_reports_other_errors(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    ydlx.MyLogger(verbose=True).error("ERROR: something broke")
+    MyLogger(verbose=True).error("ERROR: something broke")
     assert "something broke" in capsys.readouterr().out
 
 
@@ -666,7 +673,7 @@ def test_logger_keeps_ytdlp_bracket_prefixes_visible(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Rich must not swallow "[youtube]" as a markup tag in error lines."""
-    ydlx.MyLogger(verbose=True).error("ERROR: [youtube] abc: Video unavailable")
+    MyLogger(verbose=True).error("ERROR: [youtube] abc: Video unavailable")
     assert "[youtube] abc: Video unavailable" in capsys.readouterr().out
 
 
@@ -681,14 +688,14 @@ def test_logger_keeps_ytdlp_bracket_prefixes_visible(
     ],
 )
 def test_collapse_error_prefixes(raw: str, expected: str) -> None:
-    assert ydlx.collapse_error_prefixes(raw) == expected
+    assert collapse_error_prefixes(raw) == expected
 
 
 def test_report_failure_stays_quiet_for_other_errors(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    console = ydlx.Console()
-    ydlx.report_failure("HTTP Error 404: Not Found", console, "Download error")
+    console = Console()
+    report_failure("HTTP Error 404: Not Found", console, "Download error")
     out = capsys.readouterr().out
     assert "Download error: HTTP Error 404: Not Found" in out
     assert "App-Bound" not in out
@@ -698,11 +705,11 @@ def test_report_failure_skips_what_the_logger_already_printed(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The except handler must not echo the line yt-dlp logged before raising."""
-    logger = ydlx.MyLogger(verbose=True)
+    logger = MyLogger(verbose=True)
     logger.error("ERROR: [youtube] abc: Video unavailable")
     capsys.readouterr()
-    console = ydlx.Console()
-    ydlx.report_failure(
+    console = Console()
+    report_failure(
         "ERROR: [youtube] abc: Video unavailable",
         console,
         "Download error",
@@ -715,11 +722,11 @@ def test_report_failure_still_hints_for_an_already_logged_cookie_error(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The logger prints raw text only, so the hint is still worth adding once."""
-    logger = ydlx.MyLogger(verbose=True)
+    logger = MyLogger(verbose=True)
     logger.error("ERROR: Failed to decrypt with DPAPI.")
     capsys.readouterr()
-    console = ydlx.Console()
-    ydlx.report_failure(
+    console = Console()
+    report_failure(
         "ERROR: Failed to decrypt with DPAPI.",
         console,
         "Download error",
@@ -735,17 +742,17 @@ def test_report_failure_records_new_messages(
 ) -> None:
     """Repeats across handlers collapse even without a logger in the loop."""
     seen: set[str] = set()
-    console = ydlx.Console()
-    ydlx.report_failure("ERROR: boom", console, "Download error", seen)
-    ydlx.report_failure("ERROR: boom", console, "Download error", seen)
+    console = Console()
+    report_failure("ERROR: boom", console, "Download error", seen)
+    report_failure("ERROR: boom", console, "Download error", seen)
     assert capsys.readouterr().out.count("boom") == 1
 
 
 def test_logger_reported_reads_the_set_from_ydl_opts() -> None:
-    logger = ydlx.MyLogger()
-    opts = ydlx.make_extract_opts(logger=logger)
-    assert ydlx._logger_reported(opts) is logger.reported_errors
-    assert ydlx._logger_reported({}) is None
+    logger = MyLogger()
+    opts = make_extract_opts(logger=logger)
+    assert _logger_reported(opts) is logger.reported_errors
+    assert _logger_reported({}) is None
 
 
 def test_get_video_info_uses_the_provided_logger(
@@ -767,8 +774,8 @@ def test_get_video_info_uses_the_provided_logger(
         def extract_info(self, *_args: Any, **_kwargs: Any) -> Any:
             return {"id": "abc"}
 
-    monkeypatch.setattr(ydlx.yt_dlp, "YoutubeDL", FakeYoutubeDL)
-    logger = ydlx.MyLogger()
-    info = ydlx.get_video_info("https://youtu.be/abc", None, None, False, logger)
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYoutubeDL)
+    logger = MyLogger()
+    info = get_video_info("https://youtu.be/abc", None, None, False, logger)
     assert info == {"id": "abc"}
     assert captured["logger"] is logger

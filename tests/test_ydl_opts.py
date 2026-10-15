@@ -5,11 +5,11 @@ from typing import Any
 
 import pytest
 
-from ydlx import (
+from ydlx.cookies import apply_cookie_opts
+from ydlx.downloads import make_download_opts
+from ydlx.opts import (
     BASE_OPT_KEYS,
     add_opts,
-    apply_cookie_opts,
-    make_download_opts,
     make_extract_opts,
     queue_postprocessors,
 )

@@ -5,9 +5,9 @@ from typing import Any, cast
 import pytest
 import yt_dlp
 
-from ydlx import (
+from ydlx.formats import make_duration_filter
+from ydlx.subtitles import (
     configure_subtitles,
-    make_duration_filter,
     make_subtitle_convertor,
     parse_sub_langs,
     requested_sub_langs,

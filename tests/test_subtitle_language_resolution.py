@@ -6,8 +6,16 @@ from typing import Any, cast
 import pytest
 from rich.console import Console
 
-import ydlx
-from ydlx import DownloadRecord, report_subtitle_download, resolve_sub_langs
+from ydlx import cli, dashboard, downloads, subtitles
+from ydlx.downloads import DownloadRecord
+from ydlx.prompts import SubtitleOptions
+from ydlx.subtitles import (
+    parse_sub_langs,
+    report_subtitle_download,
+    requested_sub_langs,
+    resolvable_sub_langs,
+    resolve_sub_langs,
+)
 
 
 @pytest.mark.parametrize(
@@ -54,22 +62,22 @@ def test_resolve_sub_langs(
 
 @pytest.mark.parametrize("raw", ["en", "pt-BR", "zh-Hans", "es-419"])
 def test_resolvable_sub_langs_accepts_common_bcp47_tags(raw: str) -> None:
-    assert ydlx.resolvable_sub_langs([raw]) == [raw]
+    assert resolvable_sub_langs([raw]) == [raw]
 
 
 @pytest.mark.parametrize(
     "raw", ["all", "ALL", "en.*", "(en|ar)", "-en", "en_US", "en US"]
 )
 def test_resolvable_sub_langs_preserves_legacy_syntax(raw: str) -> None:
-    assert ydlx.resolvable_sub_langs([raw]) is None
+    assert resolvable_sub_langs([raw]) is None
 
 
 def test_resolvable_sub_langs_bypasses_the_whole_mixed_request() -> None:
-    assert ydlx.resolvable_sub_langs(["en", "en.*"]) is None
+    assert resolvable_sub_langs(["en", "en.*"]) is None
 
 
 def test_parse_sub_langs_deduplicates_case_insensitively() -> None:
-    assert ydlx.parse_sub_langs("en,EN,ar,en") == ["en", "ar"]
+    assert parse_sub_langs("en,EN,ar,en") == ["en", "ar"]
 
 
 def _report(
@@ -82,14 +90,14 @@ def _report(
 ) -> tuple[int, str, list[list[str] | None]]:
     pins: list[list[str] | None] = []
 
-    monkeypatch.setattr(ydlx, "get_video_info", lambda *_args: info)
+    monkeypatch.setattr(subtitles, "get_video_info", lambda *_args: info)
 
     def fake_download(_url: str, **kwargs: Any) -> int:
         record = cast(DownloadRecord, kwargs["record"])
         info_dict = cast(dict[str, Any] | None, kwargs.get("info")) or {}
         pin = kwargs.get("pin_sub_langs")
         if pin is None:
-            pin = ydlx.requested_sub_langs(cast(str, kwargs.get("sub_langs", "en")))
+            pin = requested_sub_langs(cast(str, kwargs.get("sub_langs", "en")))
         pins.append(pin)
         if info_dict.get("_type") == "playlist":
             record.subtitle_count = int(
@@ -103,7 +111,7 @@ def _report(
             record.subtitle_count = len(pin) if pin is not None else 1
         return 0
 
-    monkeypatch.setattr(ydlx, "download_subtitles_only", fake_download)
+    monkeypatch.setattr(subtitles, "download_subtitles_only", fake_download)
     output = StringIO()
     code = report_subtitle_download(
         "https://youtu.be/test",
@@ -195,16 +203,16 @@ def test_combined_download_resolves_a_single_video_before_download(
         "automatic_captions": {"ar": [{}]},
     }
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(ydlx, "get_video_info", lambda *_args, **_kwargs: info)
+    monkeypatch.setattr(cli, "get_video_info", lambda *_args, **_kwargs: info)
 
     def fake_download(url: str, **kwargs: Any) -> int:
         captured["url"] = url
         captured.update(kwargs)
         return 0
 
-    monkeypatch.setattr(ydlx, "download_video", fake_download)
+    monkeypatch.setattr(cli, "download_video", fake_download)
 
-    ydlx.download(
+    cli.download(
         url="https://youtu.be/test",
         output_dir=str(tmp_path),
         write_subs=True,
@@ -220,14 +228,14 @@ def test_combined_download_skips_unmatched_subtitles_but_downloads_media(
 ) -> None:
     info = {"id": "video", "subtitles": {"fr": [{}]}}
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(ydlx, "get_video_info", lambda *_args, **_kwargs: info)
+    monkeypatch.setattr(cli, "get_video_info", lambda *_args, **_kwargs: info)
     monkeypatch.setattr(
-        ydlx,
+        cli,
         "download_video",
         lambda _url, **kwargs: captured.update(kwargs) or 0,
     )
 
-    ydlx.download(
+    cli.download(
         url="https://youtu.be/test",
         output_dir=str(tmp_path),
         write_subs=True,
@@ -250,14 +258,14 @@ def test_combined_playlist_keeps_one_global_language_option(
         ],
     }
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(ydlx, "get_video_info", lambda *_args, **_kwargs: info)
+    monkeypatch.setattr(cli, "get_video_info", lambda *_args, **_kwargs: info)
     monkeypatch.setattr(
-        ydlx,
+        cli,
         "download_video",
         lambda _url, **kwargs: captured.update(kwargs) or 0,
     )
 
-    ydlx.download(
+    cli.download(
         url="https://youtu.be/playlist",
         output_dir=str(tmp_path),
         write_subs=True,
@@ -285,22 +293,22 @@ def test_interactive_combined_download_resolves_against_existing_info(
         confirm_calls += 1
         return confirm_calls == 2
 
-    monkeypatch.setattr(ydlx.Prompt, "ask", prompt_ask)
-    monkeypatch.setattr(ydlx.Confirm, "ask", confirm_ask)
+    monkeypatch.setattr(dashboard.Prompt, "ask", prompt_ask)
+    monkeypatch.setattr(dashboard.Confirm, "ask", confirm_ask)
     monkeypatch.setattr(
-        ydlx,
+        dashboard,
         "prompt_subtitle_options",
-        lambda: ydlx.SubtitleOptions("ar", "vtt", True),
+        lambda: SubtitleOptions("ar", "vtt", True),
     )
-    monkeypatch.setattr(ydlx, "get_default_video_dir", lambda: tmp_path)
+    monkeypatch.setattr(dashboard, "get_default_video_dir", lambda: tmp_path)
 
     def fake_download(url: str, **kwargs: Any) -> int:
         captured["url"] = url
         captured.update(kwargs)
         return 0
 
-    monkeypatch.setattr(ydlx, "download_video", fake_download)
-    ydlx.do_download_interactive(
+    monkeypatch.setattr(dashboard, "download_video", fake_download)
+    dashboard.do_download_interactive(
         "https://youtu.be/test", info, Console(file=StringIO())
     )
 
@@ -329,11 +337,11 @@ def test_media_downloader_processes_preextracted_info(
         def download(self, _urls: list[str]) -> int:
             pytest.fail("pre-extracted info should not trigger a second extraction")
 
-    monkeypatch.setattr(ydlx, "make_download_opts", lambda *_args: {})
-    monkeypatch.setattr(ydlx, "apply_cookie_opts", lambda *_args: None)
-    monkeypatch.setattr(ydlx, "build_downloader", lambda *_args: FakeDownloader())
+    monkeypatch.setattr(downloads, "make_download_opts", lambda *_args: {})
+    monkeypatch.setattr(downloads, "apply_cookie_opts", lambda *_args: None)
+    monkeypatch.setattr(downloads, "build_downloader", lambda *_args: FakeDownloader())
 
-    code = ydlx.download_video(
+    code = downloads.download_video(
         "https://youtu.be/video",
         output_dir=tmp_path,
         info=info,
@@ -356,8 +364,8 @@ def test_bypass_tokens_use_legacy_url_path_without_pre_extraction(
         cast(DownloadRecord, kwargs["record"]).subtitle_count = 1
         return 0
 
-    monkeypatch.setattr(ydlx, "get_video_info", fail_extraction)
-    monkeypatch.setattr(ydlx, "download_subtitles_only", legacy_download)
+    monkeypatch.setattr(subtitles, "get_video_info", fail_extraction)
+    monkeypatch.setattr(subtitles, "download_subtitles_only", legacy_download)
     code = report_subtitle_download(
         "https://youtu.be/test",
         tmp_path,
@@ -379,7 +387,7 @@ def test_interactive_metadata_is_reused_without_reextracting(
     captured: dict[str, Any] = {}
 
     monkeypatch.setattr(
-        ydlx,
+        subtitles,
         "get_video_info",
         lambda *_args: pytest.fail("passed metadata must be reused"),
     )
@@ -389,7 +397,7 @@ def test_interactive_metadata_is_reused_without_reextracting(
         cast(DownloadRecord, kwargs["record"]).subtitle_count = 1
         return 0
 
-    monkeypatch.setattr(ydlx, "download_subtitles_only", fake_download)
+    monkeypatch.setattr(subtitles, "download_subtitles_only", fake_download)
     code = report_subtitle_download(
         "https://youtu.be/test",
         tmp_path,
@@ -410,10 +418,12 @@ def test_extraction_failure_does_not_fall_back_to_url_download(
 ) -> None:
     output = StringIO()
     monkeypatch.setattr(
-        ydlx, "get_video_info", lambda *_args: (_ for _ in ()).throw(RuntimeError("no"))
+        subtitles,
+        "get_video_info",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("no")),
     )
     monkeypatch.setattr(
-        ydlx,
+        subtitles,
         "download_subtitles_only",
         lambda *_args, **_kwargs: pytest.fail("must not fall back"),
     )
@@ -452,18 +462,18 @@ def test_preextracted_downloader_processes_the_same_info_dict(
             captured["download"] = download
             cast(DownloadRecord, captured["record"]).subtitle_count = 1
 
-    monkeypatch.setattr(ydlx, "make_download_opts", lambda *_args: {"quiet": True})
-    monkeypatch.setattr(ydlx, "apply_cookie_opts", lambda *_args: None)
+    monkeypatch.setattr(subtitles, "make_download_opts", lambda *_args: {"quiet": True})
+    monkeypatch.setattr(subtitles, "apply_cookie_opts", lambda *_args: None)
 
     def build(opts: dict[str, Any], record: DownloadRecord) -> FakeDownloader:
         captured["opts"] = opts
         captured["record"] = record
         return FakeDownloader()
 
-    monkeypatch.setattr(ydlx, "build_downloader", build)
+    monkeypatch.setattr(subtitles, "build_downloader", build)
     record = DownloadRecord()
 
-    code = ydlx.download_subtitles_only(
+    code = subtitles.download_subtitles_only(
         "https://youtu.be/video",
         pin_sub_langs=["en-US"],
         output_dir=tmp_path,
@@ -488,9 +498,9 @@ def test_url_downloader_passes_only_subtitle_options_to_download_video(
         captured.update(kwargs)
         return 0
 
-    monkeypatch.setattr(ydlx, "download_video", fake_download)
+    monkeypatch.setattr(subtitles, "download_video", fake_download)
 
-    code = ydlx.download_subtitles_only(
+    code = subtitles.download_subtitles_only(
         "https://youtu.be/video",
         output_dir=tmp_path,
         pin_sub_langs=["en-US"],

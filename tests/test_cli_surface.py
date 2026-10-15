@@ -5,7 +5,7 @@ from typing import Any, cast
 
 import pytest
 
-from ydlx import app
+from ydlx.cli import app
 
 # Subtitle-related option parameters, tracked by name across every command.
 SUBTITLE_PARAMS = frozenset(

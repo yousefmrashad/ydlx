@@ -35,4 +35,4 @@ jobs:
         run: uv run pytest -q
 
       - name: Type check
-        run: uv run basedpyright ydlx.py tests/
+        run: uv run basedpyright src tests/

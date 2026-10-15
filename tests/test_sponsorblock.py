@@ -5,17 +5,17 @@ from typing import Any, cast
 import pytest
 from yt_dlp import YoutubeDL
 
-from ydlx import (
+from ydlx.formats import make_audio_format_spec
+from ydlx.prompts import prompt_audio_options
+from ydlx.sponsorblock import (
     SPONSORBLOCK_CATEGORIES,
     configure_sponsorblock,
-    configure_subtitles,
     is_youtube_info,
     is_youtube_url,
-    make_audio_format_spec,
     maybe_configure_sponsorblock,
-    prompt_audio_options,
     should_offer_sponsorblock,
 )
+from ydlx.subtitles import configure_subtitles
 
 
 def test_configure_sponsorblock_queues_both_postprocessors() -> None:
@@ -202,12 +202,12 @@ def test_prompt_audio_options_skips_sponsorblock_off_youtube(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The question must not even be asked for a non-YouTube URL."""
-    monkeypatch.setattr("ydlx.Prompt.ask", lambda *args, **kwargs: "m4a")
+    monkeypatch.setattr("ydlx.prompts.Prompt.ask", lambda *args, **kwargs: "m4a")
 
     def _fail_confirm(*args: Any, **kwargs: Any) -> bool:
         raise AssertionError("SponsorBlock must not be asked about")
 
-    monkeypatch.setattr("ydlx.Confirm.ask", _fail_confirm)
+    monkeypatch.setattr("ydlx.prompts.Confirm.ask", _fail_confirm)
     options = prompt_audio_options("https://www.instagram.com/reel/abc/")
     assert options == ("m4a", False)
 
@@ -215,7 +215,7 @@ def test_prompt_audio_options_skips_sponsorblock_off_youtube(
 def test_prompt_audio_options_asks_sponsorblock_for_youtube(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("ydlx.Prompt.ask", lambda *args, **kwargs: "m4a")
-    monkeypatch.setattr("ydlx.Confirm.ask", lambda *args, **kwargs: True)
+    monkeypatch.setattr("ydlx.prompts.Prompt.ask", lambda *args, **kwargs: "m4a")
+    monkeypatch.setattr("ydlx.prompts.Confirm.ask", lambda *args, **kwargs: True)
     options = prompt_audio_options("https://www.youtube.com/watch?v=abc")
     assert options.sponsorblock is True

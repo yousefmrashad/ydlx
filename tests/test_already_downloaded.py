@@ -8,17 +8,17 @@ import pytest
 from rich.console import Console
 from yt_dlp.utils import DownloadError
 
-import ydlx
-from ydlx import (
+from ydlx import downloads
+from ydlx.downloads import (
     ALREADY_DOWNLOADED_HINT,
     DownloadRecord,
-    MyLogger,
     TrackingYoutubeDL,
     build_downloader,
     download_video,
     is_sponsorblock_embed_rerun,
     report_already_downloaded,
 )
+from ydlx.errors import MyLogger
 
 
 class _RecordingLogger(MyLogger):
@@ -221,10 +221,10 @@ def test_download_reports_actionable_warning_for_sponsorblock_embed_rerun(
             )
 
     monkeypatch.setattr(
-        ydlx, "Console", lambda *args, **kwargs: Console(file=buffer, width=200)
+        downloads, "Console", lambda *args, **kwargs: Console(file=buffer, width=200)
     )
     monkeypatch.setattr(
-        ydlx, "build_downloader", lambda _opts, _record: FailedDownloader()
+        downloads, "build_downloader", lambda _opts, _record: FailedDownloader()
     )
     record = DownloadRecord()
     record.skipped = ["video.webm"]

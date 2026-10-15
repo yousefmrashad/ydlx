@@ -13,8 +13,14 @@ from typing import Any, cast
 import pytest
 from rich.console import Console
 
-import ydlx
-from ydlx import DownloadRecord, SubtitleCollectorPP, report_subtitle_download
+from ydlx import subtitles
+from ydlx.downloads import (
+    DownloadRecord,
+    DownloadTracker,
+    SubtitleCollectorPP,
+    is_subtitle_download,
+)
+from ydlx.subtitles import report_subtitle_download
 
 URL = "https://youtu.be/abc123"
 NO_HINT = "allow auto-generated captions"
@@ -105,11 +111,11 @@ def _run(
         return 0
 
     monkeypatch.setattr(
-        ydlx,
+        subtitles,
         "get_video_info",
         lambda *_args, **_kwargs: {"subtitles": {"en": [{}]}},
     )
-    monkeypatch.setattr(ydlx, "download_subtitles_only", fake_download)
+    monkeypatch.setattr(subtitles, "download_subtitles_only", fake_download)
 
     buffer = StringIO()
     code = report_subtitle_download(
@@ -186,11 +192,11 @@ def test_a_failed_download_is_reported_before_the_count(
         return 1
 
     monkeypatch.setattr(
-        ydlx,
+        subtitles,
         "get_video_info",
         lambda *_args, **_kwargs: {"subtitles": {"en": [{}]}},
     )
-    monkeypatch.setattr(ydlx, "download_subtitles_only", fake_download)
+    monkeypatch.setattr(subtitles, "download_subtitles_only", fake_download)
     buffer = StringIO()
     code = report_subtitle_download(
         URL,
@@ -231,9 +237,9 @@ def _run_hook(
     """Feeds one progress event through a tracker and returns what it printed."""
     buffer = StringIO()
     monkeypatch.setattr(
-        ydlx, "Console", lambda *a, **k: Console(file=buffer, width=200)
+        "ydlx.downloads.Console", lambda *a, **k: Console(file=buffer, width=200)
     )
-    tracker = ydlx.DownloadTracker()
+    tracker = DownloadTracker()
     tracker.hook({"status": status, "filename": "x", "info_dict": info})
 
     return buffer.getvalue()
@@ -251,8 +257,10 @@ def test_a_track_draws_no_progress_bar(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A track is not media, so the tracker must not claim to be downloading it."""
-    monkeypatch.setattr(ydlx, "Console", lambda *a, **k: Console(file=StringIO()))
-    tracker = ydlx.DownloadTracker()
+    monkeypatch.setattr(
+        "ydlx.downloads.Console", lambda *a, **k: Console(file=StringIO())
+    )
+    tracker = DownloadTracker()
 
     tracker.hook(
         {
@@ -274,8 +282,10 @@ def test_a_track_does_not_close_a_live_media_bar(
     Subtitles are written before the media, but the hook order is not ours to
     assume, so a track must leave an in-flight media bar alone.
     """
-    monkeypatch.setattr(ydlx, "Console", lambda *a, **k: Console(file=StringIO()))
-    tracker = ydlx.DownloadTracker()
+    monkeypatch.setattr(
+        "ydlx.downloads.Console", lambda *a, **k: Console(file=StringIO())
+    )
+    tracker = DownloadTracker()
     tracker.hook(
         {
             "status": "downloading",
@@ -307,9 +317,9 @@ def test_the_tell_is_the_video_id(info: dict[str, Any], expected: bool) -> None:
     never does. Checked structurally because yt-dlp's own subtitle extension list
     covers only ass/lrc/srt/vtt and would miss json, ttml and dfxp.
     """
-    assert ydlx.is_subtitle_download({"info_dict": info}) is expected
+    assert is_subtitle_download({"info_dict": info}) is expected
 
 
 def test_a_hook_with_no_info_dict_is_treated_as_a_track() -> None:
     """Nothing identifies it as media, so it must not be announced."""
-    assert ydlx.is_subtitle_download({}) is True
+    assert is_subtitle_download({}) is True

@@ -11,7 +11,7 @@ from typing import Any, cast
 import pytest
 import yt_dlp
 
-from ydlx import VideoPreset, make_audio_format_spec, make_video_format_spec
+from ydlx.formats import VideoPreset, make_audio_format_spec, make_video_format_spec
 
 # Mirrors a typical YouTube format list: pre-merged legacy stream, H.264 and
 # AV1 video-only streams, VP9 video-only, plus m4a/opus audio-only streams.

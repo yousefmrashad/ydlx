@@ -5,11 +5,13 @@ from pathlib import Path
 
 import pytest
 
-import ydlx
-from ydlx import (
+from ydlx.paths import (
     get_default_downloads_dir,
     get_default_music_dir,
     get_default_video_dir,
+)
+from ydlx.settings import (
+    get_config_dir,
     get_saved_cookie_source,
     load_settings,
     save_settings,
@@ -121,4 +123,4 @@ def test_settings_written_are_valid_utf8_json(isolated_config_dir: Path) -> None
 
 def test_get_config_dir_is_redirected_by_fixture(isolated_config_dir: Path) -> None:
     """Guards the autouse fixture: tests must never touch the real user config."""
-    assert ydlx.get_config_dir() == isolated_config_dir
+    assert get_config_dir() == isolated_config_dir
