@@ -8,7 +8,10 @@ from ydlx import (
     SPONSORBLOCK_CATEGORIES,
     configure_sponsorblock,
     configure_subtitles,
+    is_youtube_info,
+    is_youtube_url,
     make_audio_format_spec,
+    maybe_configure_sponsorblock,
 )
 
 
@@ -106,3 +109,65 @@ def test_sponsorblock_and_subtitles_compose_in_either_order() -> None:
         keys = [pp["key"] for pp in opts["postprocessors"]]
         assert keys[0] == "FFmpegExtractAudio"
         assert set(keys[1:]) == expected
+
+
+def test_is_youtube_url_matches_youtube_hosts() -> None:
+    assert is_youtube_url("https://www.youtube.com/watch?v=abc")
+    assert is_youtube_url("https://youtu.be/abc")
+    assert is_youtube_url("https://music.youtube.com/watch?v=abc")
+    assert is_youtube_url("https://m.youtube.com/watch?v=abc")
+    assert is_youtube_url("https://www.youtube.com:443/watch?v=abc")
+    assert not is_youtube_url("https://www.fakeyoutube.com/watch?v=abc")
+    assert not is_youtube_url("https://youtube.com.evil.com/watch?v=abc")
+    assert not is_youtube_url("https://www.instagram.com/reel/abc/")
+    assert not is_youtube_url("https://www.tiktok.com/@user/video/123")
+    assert not is_youtube_url(None)
+    assert not is_youtube_url("")
+
+
+def test_is_youtube_info_reads_extractor_keys() -> None:
+    assert is_youtube_info({"extractor_key": "Youtube"})
+    assert is_youtube_info({"extractor": "youtube"})
+    assert is_youtube_info({"webpage_url": "https://youtu.be/abc"})
+    assert not is_youtube_info({"extractor_key": "Instagram"})
+    assert not is_youtube_info({})
+    assert not is_youtube_info(None)
+
+
+def test_maybe_configure_sponsorblock_skips_non_youtube_url() -> None:
+    opts: dict[str, Any] = {}
+    applied = maybe_configure_sponsorblock(
+        opts, url="https://www.instagram.com/reel/abc/"
+    )
+    assert applied is False
+    assert opts.get("postprocessors") is None
+
+
+def test_maybe_configure_sponsorblock_applies_for_youtube() -> None:
+    opts: dict[str, Any] = {}
+    applied = maybe_configure_sponsorblock(
+        opts, url="https://www.youtube.com/watch?v=abc"
+    )
+    assert applied is True
+    assert [pp["key"] for pp in opts["postprocessors"]] == [
+        "SponsorBlock",
+        "ModifyChapters",
+    ]
+
+
+def test_maybe_configure_sponsorblock_prefers_info_over_url() -> None:
+    opts: dict[str, Any] = {}
+    applied = maybe_configure_sponsorblock(
+        opts,
+        url="https://www.youtube.com/watch?v=abc",
+        info={"extractor_key": "Instagram"},
+    )
+    assert applied is False
+    assert opts.get("postprocessors") is None
+
+
+def test_maybe_configure_sponsorblock_honors_unknown_source() -> None:
+    """Undeterminable sources keep the old behavior (e.g. uninspected info.json)."""
+    opts: dict[str, Any] = {}
+    assert maybe_configure_sponsorblock(opts) is True
+    assert "postprocessors" in opts

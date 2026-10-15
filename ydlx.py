@@ -819,7 +819,7 @@ def parse_cli_url(url: str) -> str:
     normalized = normalize_url(url)
     if normalized is None:
         Console().print(
-            "[bold red]❌ Invalid URL. Provide a full link, e.g. https://youtu.be/VIDEO_ID[/bold red]"
+            "[bold red]❌ Invalid URL. Provide a full video link, e.g. https://www.youtube.com/watch?v=VIDEO_ID[/bold red]"
         )
         raise typer.Exit(code=1)
     return normalized
@@ -945,7 +945,7 @@ def prompt_for_url(console: Console) -> str:
         if normalized:
             return normalized
         console.print(
-            "[bold red]❌ Empty or invalid URL. Use a full link, e.g. https://youtu.be/VIDEO_ID[/bold red]"
+            "[bold red]❌ Empty or invalid URL. Use a full video link, e.g. https://www.youtube.com/watch?v=VIDEO_ID[/bold red]"
         )
 
 
@@ -995,7 +995,7 @@ def prompt_audio_options() -> AudioOptions:
         default="m4a",
     )
     sponsorblock = Confirm.ask(
-        "Skip sponsor and self-promotion segments using SponsorBlock?",
+        "Skip sponsor and self-promotion segments using SponsorBlock? (YouTube only)",
         default=False,
     )
     return AudioOptions(codec=codec, sponsorblock=sponsorblock)
@@ -1177,7 +1177,7 @@ def download_audio(
         ],
     }
     if sponsorblock:
-        configure_sponsorblock(opts)
+        maybe_configure_sponsorblock(opts, url=url)
 
     return download_video(
         url,
@@ -1357,6 +1357,67 @@ def configure_sponsorblock(opts: dict[str, Any]) -> None:
             "when": "after_move",
         },
     )
+
+
+def is_youtube_url(url: str | None) -> bool:
+    """Whether a URL points at YouTube (watch, share, music, etc.)."""
+    if not url:
+        return False
+    try:
+        host = urlparse(url.strip()).netloc.lower().split("@")[-1].split(":")[0]
+    except ValueError:
+        return False
+    return (
+        host in ("youtu.be", "youtube.com", "music.youtube.com", "m.youtube.com")
+        or host.endswith(".youtu.be")
+        or host.endswith(".youtube.com")
+    )
+
+
+def is_youtube_info(info: dict[str, Any] | None) -> bool:
+    """Whether an extracted info dict came from a YouTube extractor."""
+    if not info:
+        return False
+    for key in ("extractor_key", "extractor", "ie_key"):
+        value = info.get(key)
+        if isinstance(value, str) and "youtube" in value.lower():
+            return True
+    for key in ("webpage_url", "original_url"):
+        value = info.get(key)
+        if isinstance(value, str) and is_youtube_url(value):
+            return True
+    return False
+
+
+def maybe_configure_sponsorblock(
+    opts: dict[str, Any],
+    console: Console | None = None,
+    *,
+    url: str | None = None,
+    info: dict[str, Any] | None = None,
+) -> bool:
+    """
+    Queues SponsorBlock postprocessors when the target is YouTube.
+
+    SponsorBlock's segment database only covers YouTube, so on any other site
+    the lookup is a wasted API call at best. Returns True when the
+    postprocessors were queued; otherwise warns and returns False. An info
+    dict takes precedence when available, falling back to the URL; when
+    neither identifies the site, the request is honored (preserving the old
+    behavior for --info-json flows that have not been inspected yet).
+    """
+    applies: bool | None = None
+    if info is not None:
+        applies = is_youtube_info(info)
+    elif url is not None:
+        applies = is_youtube_url(url)
+    if applies is False:
+        (console or Console()).print(
+            "[yellow]⚠️  SponsorBlock only supports YouTube — continuing without it.[/yellow]"
+        )
+        return False
+    configure_sponsorblock(opts)
+    return True
 
 
 def make_subtitle_convertor(sub_format: str) -> dict[str, Any] | None:
@@ -1957,12 +2018,13 @@ def do_download_interactive(
     else:
         return
 
-    # Ask about SponsorBlock skipping
+    # Ask about SponsorBlock skipping (YouTube only)
     skip_sponsors = Confirm.ask(
-        "Skip sponsor and self-promotion segments using SponsorBlock?", default=False
+        "Skip sponsor and self-promotion segments using SponsorBlock? (YouTube only)",
+        default=False,
     )
     if skip_sponsors:
-        configure_sponsorblock(opts)
+        maybe_configure_sponsorblock(opts, console, url=url, info=info)
 
     # Ask about Subtitles. This flow only ever downloads media to the video
     # directory, so the prompt always applies; it used to be guarded by
@@ -2478,7 +2540,7 @@ def download(
         Option(
             "--sponsorblock",
             "-s",
-            help="Skip sponsor and self-promotion segments using SponsorBlock",
+            help="Skip sponsor and self-promotion segments using SponsorBlock (YouTube only)",
         ),
     ] = False,
     write_subs: Annotated[
@@ -2574,9 +2636,22 @@ def download(
     if min_duration is not None or max_duration is not None:
         opts["match_filter"] = make_duration_filter(min_duration, max_duration)
 
-    # Setup SponsorBlock
+    # Setup SponsorBlock (YouTube only). The info.json path peeks at the file's
+    # extractor key so a non-YouTube metadata file skips the lookup instead of
+    # firing a useless API call; an unreadable file falls back to the URL check.
     if sponsorblock:
-        configure_sponsorblock(opts)
+        sb_info = download_info
+        if sb_info is None and info_json:
+            try:
+                with open(info_json, encoding="utf-8") as _sb_file:
+                    _loaded = json.load(_sb_file)
+                sb_info = _loaded if isinstance(_loaded, dict) else None
+            except (OSError, json.JSONDecodeError):
+                sb_info = None
+        if sb_info is not None:
+            maybe_configure_sponsorblock(opts, console, info=sb_info)
+        else:
+            maybe_configure_sponsorblock(opts, console, url=url)
 
     # Setup Subtitles
     if write_subs or embed_subs:
@@ -2683,7 +2758,7 @@ def audio(
         Option(
             "--sponsorblock",
             "-s",
-            help="Skip sponsor and self-promotion segments using SponsorBlock",
+            help="Skip sponsor and self-promotion segments using SponsorBlock (YouTube only)",
         ),
     ] = False,
     verbose: Annotated[

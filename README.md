@@ -7,6 +7,8 @@
 
 A modern, fast, interactive CLI dashboard and downloader built on top of [yt-dlp](https://github.com/yt-dlp/yt-dlp).
 
+Works with YouTube, Instagram, TikTok, and 1000+ other [yt-dlp-supported sites](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md).
+
 **ydlx** eliminates complex parameter strings and brings an intuitive interactive menu, universal codec compatibility presets, automated SponsorBlock skipping, browser cookie integration, and smart platform-agnostic output organization.
 
 <img src="https://raw.githubusercontent.com/yousefmrashad/ydlx/master/docs/dashboard.png" alt="ydlx Interactive Dashboard" width="650">
@@ -21,8 +23,8 @@ A modern, fast, interactive CLI dashboard and downloader built on top of [yt-dlp
   - Videos automatically save to `~/Downloads/video`
 - 🎬 **Universal MP4 Mode**: Automatically selects and muxes compatible H.264 + AAC streams that play everywhere.
 - 🎵 **Dedicated Audio Extraction**: One-command audio downloading with format conversion (M4A, MP3, WAV, FLAC).
-- 💬 **Subtitles & Closed Captions**: Download separate `.srt` files, embed subtitles into video files, or download subtitles only without fetching the video.
-- 🛡️ **SponsorBlock Integration**: Seamlessly skip sponsors and self-promotions with `--sponsorblock` / `-s`.
+- 💬 **Subtitles & Closed Captions**: Download separate `.srt` files, embed subtitles into video files, or download subtitles only without fetching the video (where the site provides them).
+- 🛡️ **SponsorBlock Integration**: Seamlessly skip sponsors and self-promotions with `--sponsorblock` / `-s` (YouTube only).
 - 🍪 **Cookie Support**: Avoid 403 Forbidden / bot-detection errors by loading cookies directly from your browser, or from a `cookies.txt` file.
 - 🎨 **Rich UI**: Beautiful formatted metadata tables and download progress bars with native UTF-8 support.
 
