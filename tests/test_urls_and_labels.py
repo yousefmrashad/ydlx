@@ -4,7 +4,7 @@ import pytest
 import typer
 
 import ydlx
-from ydlx import _video_codec_label, normalize_url, parse_cli_url
+from ydlx import _video_codec_label, normalize_url, parse_cli_url, prompt_for_url
 
 
 @pytest.mark.parametrize(
@@ -50,6 +50,42 @@ def test_parse_cli_url_exits_on_invalid_input() -> None:
     with pytest.raises(typer.Exit) as exc_info:
         parse_cli_url("nonsense")
     assert exc_info.value.exit_code == 1
+
+
+def _scripted_prompt(monkeypatch: pytest.MonkeyPatch, *answers: str) -> None:
+    """Feeds canned answers to Prompt.ask in order."""
+    pending = list(answers)
+    monkeypatch.setattr(ydlx.Prompt, "ask", lambda *_args, **_kwargs: pending.pop(0))
+
+
+@pytest.mark.parametrize("word", ["back", "Back", "  BACK  ", "q", "Q"])
+def test_prompt_for_url_returns_none_on_back(
+    monkeypatch: pytest.MonkeyPatch, word: str
+) -> None:
+    _scripted_prompt(monkeypatch, word)
+    assert prompt_for_url(ydlx.Console()) is None
+
+
+def test_prompt_for_url_returns_normalized_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _scripted_prompt(monkeypatch, "youtu.be/abc")
+    assert prompt_for_url(ydlx.Console()) == "https://youtu.be/abc"
+
+
+def test_prompt_for_url_retries_invalid_input_then_accepts(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _scripted_prompt(monkeypatch, "nonsense", "youtu.be/abc")
+    assert prompt_for_url(ydlx.Console()) == "https://youtu.be/abc"
+    assert "invalid URL" in capsys.readouterr().out
+
+
+def test_prompt_for_url_back_after_invalid_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _scripted_prompt(monkeypatch, "nonsense", "back")
+    assert prompt_for_url(ydlx.Console()) is None
 
 
 @pytest.mark.parametrize(

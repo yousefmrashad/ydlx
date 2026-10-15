@@ -965,10 +965,17 @@ def parse_cookie_file(cookie_file: str) -> str:
     return expanded
 
 
-def prompt_for_url(console: Console) -> str:
-    """Prompts until the user enters a usable video URL."""
+# Words that abandon a URL prompt and return to the previous menu. Checked
+# before validation: none of them can be a URL (normalize_url rejects them all).
+URL_PROMPT_BACK_WORDS = ("back", "q")
+
+
+def prompt_for_url(console: Console) -> str | None:
+    """Prompts until the user enters a usable video URL, or None on 'back'."""
     while True:
-        url = Prompt.ask("Enter video URL").strip()
+        url = Prompt.ask("Enter video URL (or 'back')").strip()
+        if url.casefold() in URL_PROMPT_BACK_WORDS:
+            return None
         normalized = normalize_url(url)
         if normalized:
             return normalized
@@ -2269,6 +2276,8 @@ def run_interactive_menu() -> None:
 
         if choice == "1":
             url = prompt_for_url(console)
+            if url is None:
+                continue
             menu_logger = MyLogger()
             with console.status("[bold blue]Fetching metadata...[/bold blue]"):
                 try:
@@ -2322,14 +2331,20 @@ def run_interactive_menu() -> None:
 
         elif choice == "2":
             url = prompt_for_url(console)
+            if url is None:
+                continue
             do_download_interactive(url, None, console)
 
         elif choice == "3":
             url = prompt_for_url(console)
+            if url is None:
+                continue
             download_audio_interactively(url, console)
 
         elif choice == "4":
             url = prompt_for_url(console)
+            if url is None:
+                continue
             download_subtitles_interactively(url, console)
 
         elif choice == "5":
