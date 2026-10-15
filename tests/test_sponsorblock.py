@@ -2,6 +2,7 @@
 
 from typing import Any, cast
 
+import pytest
 from yt_dlp import YoutubeDL
 
 from ydlx import (
@@ -12,6 +13,8 @@ from ydlx import (
     is_youtube_url,
     make_audio_format_spec,
     maybe_configure_sponsorblock,
+    prompt_audio_options,
+    should_offer_sponsorblock,
 )
 
 
@@ -171,3 +174,48 @@ def test_maybe_configure_sponsorblock_honors_unknown_source() -> None:
     opts: dict[str, Any] = {}
     assert maybe_configure_sponsorblock(opts) is True
     assert "postprocessors" in opts
+
+
+def test_maybe_configure_sponsorblock_defers_thin_info_to_url() -> None:
+    """An info dict with no site evidence falls back to the URL check."""
+    opts: dict[str, Any] = {}
+    assert (
+        maybe_configure_sponsorblock(
+            opts, url="https://www.instagram.com/reel/abc/", info={"id": "abc"}
+        )
+        is False
+    )
+    assert opts.get("postprocessors") is None
+
+
+def test_should_offer_sponsorblock_only_for_youtube_or_unknown() -> None:
+    assert should_offer_sponsorblock(url="https://www.youtube.com/watch?v=abc") is True
+    assert should_offer_sponsorblock(url="https://www.instagram.com/reel/abc/") is False
+    assert should_offer_sponsorblock(info={"extractor_key": "Instagram"}) is False
+    assert should_offer_sponsorblock(info={"extractor_key": "Youtube"}) is True
+    # Unknown sites keep the old behavior; the configure backstop still warns.
+    assert should_offer_sponsorblock() is True
+    assert should_offer_sponsorblock(info={"id": "abc"}) is True
+
+
+def test_prompt_audio_options_skips_sponsorblock_off_youtube(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The question must not even be asked for a non-YouTube URL."""
+    monkeypatch.setattr("ydlx.Prompt.ask", lambda *args, **kwargs: "m4a")
+
+    def _fail_confirm(*args: Any, **kwargs: Any) -> bool:
+        raise AssertionError("SponsorBlock must not be asked about")
+
+    monkeypatch.setattr("ydlx.Confirm.ask", _fail_confirm)
+    options = prompt_audio_options("https://www.instagram.com/reel/abc/")
+    assert options == ("m4a", False)
+
+
+def test_prompt_audio_options_asks_sponsorblock_for_youtube(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("ydlx.Prompt.ask", lambda *args, **kwargs: "m4a")
+    monkeypatch.setattr("ydlx.Confirm.ask", lambda *args, **kwargs: True)
+    options = prompt_audio_options("https://www.youtube.com/watch?v=abc")
+    assert options.sponsorblock is True

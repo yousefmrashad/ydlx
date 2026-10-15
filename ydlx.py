@@ -987,17 +987,19 @@ def prompt_subtitle_options() -> SubtitleOptions:
     return SubtitleOptions(langs=langs, sub_format=sub_format, auto_subs=auto_subs)
 
 
-def prompt_audio_options() -> AudioOptions:
+def prompt_audio_options(url: str | None = None) -> AudioOptions:
     """Asks the audio questions shared by every audio download."""
     codec = Prompt.ask(
         "Select audio format",
         choices=list(AUDIO_CODEC_CHOICES),
         default="m4a",
     )
-    sponsorblock = Confirm.ask(
-        "Skip sponsor and self-promotion segments using SponsorBlock? (YouTube only)",
-        default=False,
-    )
+    sponsorblock = False
+    if should_offer_sponsorblock(url=url):
+        sponsorblock = Confirm.ask(
+            "Skip sponsor and self-promotion segments using SponsorBlock? (YouTube only)",
+            default=False,
+        )
     return AudioOptions(codec=codec, sponsorblock=sponsorblock)
 
 
@@ -1389,6 +1391,41 @@ def is_youtube_info(info: dict[str, Any] | None) -> bool:
     return False
 
 
+def _site_identified(info: dict[str, Any]) -> bool:
+    """Whether an info dict carries any evidence of which site it came from."""
+    for key in ("extractor_key", "extractor", "ie_key", "webpage_url", "original_url"):
+        if info.get(key):
+            return True
+    return False
+
+
+def _identified_site_is_youtube(
+    url: str | None = None, info: dict[str, Any] | None = None
+) -> bool | None:
+    """
+    True/False when the target site is identified, None when it is unknown.
+
+    An info dict takes precedence when it names a site; a dict with no site
+    evidence defers to the URL; with neither, the site is unknown and callers
+    keep the old behavior rather than guessing.
+    """
+    if info is not None:
+        if is_youtube_info(info):
+            return True
+        if _site_identified(info):
+            return False
+    if url is not None:
+        return is_youtube_url(url)
+    return None
+
+
+def should_offer_sponsorblock(
+    url: str | None = None, info: dict[str, Any] | None = None
+) -> bool:
+    """Whether to even ask about SponsorBlock: only for YouTube or unknown sites."""
+    return _identified_site_is_youtube(url=url, info=info) is not False
+
+
 def maybe_configure_sponsorblock(
     opts: dict[str, Any],
     console: Console | None = None,
@@ -1406,12 +1443,7 @@ def maybe_configure_sponsorblock(
     neither identifies the site, the request is honored (preserving the old
     behavior for --info-json flows that have not been inspected yet).
     """
-    applies: bool | None = None
-    if info is not None:
-        applies = is_youtube_info(info)
-    elif url is not None:
-        applies = is_youtube_url(url)
-    if applies is False:
+    if _identified_site_is_youtube(url=url, info=info) is False:
         (console or Console()).print(
             "[yellow]⚠️  SponsorBlock only supports YouTube — continuing without it.[/yellow]"
         )
@@ -2018,13 +2050,15 @@ def do_download_interactive(
     else:
         return
 
-    # Ask about SponsorBlock skipping (YouTube only)
-    skip_sponsors = Confirm.ask(
-        "Skip sponsor and self-promotion segments using SponsorBlock? (YouTube only)",
-        default=False,
-    )
-    if skip_sponsors:
-        maybe_configure_sponsorblock(opts, console, url=url, info=info)
+    # Ask about SponsorBlock skipping (YouTube only). Off-YouTube the question
+    # is skipped entirely; the CLI flag path still warns via maybe_configure.
+    if should_offer_sponsorblock(url=url, info=info):
+        skip_sponsors = Confirm.ask(
+            "Skip sponsor and self-promotion segments using SponsorBlock? (YouTube only)",
+            default=False,
+        )
+        if skip_sponsors:
+            maybe_configure_sponsorblock(opts, console, url=url, info=info)
 
     # Ask about Subtitles. This flow only ever downloads media to the video
     # directory, so the prompt always applies; it used to be guarded by
@@ -2089,7 +2123,7 @@ def download_subtitles_interactively(
 
 def download_audio_interactively(url: str, console: Console) -> None:
     """Asks for audio options and downloads into the music directory."""
-    options = prompt_audio_options()
+    options = prompt_audio_options(url)
     music_dir = get_default_music_dir()
     console.print(
         f"[blue]Starting audio download ({options.codec}) to [cyan]{music_dir}[/cyan]...[/blue]"
