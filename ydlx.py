@@ -139,7 +139,7 @@ class MyLogger:
             self.console.print(f"[cyan]{msg}[/cyan]")
 
     def warning(self, msg: str) -> None:
-        self.console.print(f"[yellow]⚠️  Warning: {strip_ansi(msg)}[/yellow]")
+        self.console.print(f"[yellow]⚠️  Warning: {escape(strip_ansi(msg))}[/yellow]")
 
     def error(self, msg: str) -> None:
         # Always report what yt-dlp actually said, so an unrelated error is never
@@ -151,7 +151,9 @@ class MyLogger:
         if clean in self.reported_errors:
             return
         self.reported_errors.add(clean)
-        self.console.print(f"[bold red]❌ Error: {clean}[/bold red]")
+        # Escaped: yt-dlp prefixes failures with "[youtube]" / "[info]", which
+        # Rich would otherwise read as markup tags and silently drop.
+        self.console.print(f"[bold red]❌ Error: {escape(clean)}[/bold red]")
 
 
 def is_subtitle_download(status: dict[str, Any]) -> bool:
@@ -735,20 +737,46 @@ def cookie_failure_hint(message: str) -> str | None:
     return None
 
 
-def report_failure(message: str, console: Console, prefix: str = "Error") -> None:
+def report_failure(
+    message: str,
+    console: Console,
+    prefix: str = "Error",
+    already_reported: set[str] | None = None,
+) -> None:
     """
-    Reports a failure exactly once.
+    Reports a failure, skipping text yt-dlp already logged through MyLogger.
 
-    A cookie problem prints only actionable guidance: yt-dlp's own message is
-    typically a duplicated "ERROR: ERROR: ..." line whose link the guidance
-    already carries, so repeating it only buries the fix.
+    yt-dlp logs through logger.error before raising, so by the time an except
+    handler runs the raw message is usually on screen already (under an
+    "Error" prefix) and printing it again under "<prefix>" only duplicates it.
+    already_reported is that logger's reported_errors set: a message found
+    there is not re-printed, though a cookie hint still is, since the logger
+    only ever prints the raw text. Anything new is printed as before and
+    recorded, so repeats across handlers collapse too.
+
+    A cookie problem still prints only actionable guidance: yt-dlp's own
+    message is typically a duplicated "ERROR: ERROR: ..." line whose link the
+    guidance already carries, so repeating it only buries the fix.
     """
     clean = collapse_error_prefixes(message)
     hint = cookie_failure_hint(clean)
+    if already_reported is not None and clean in already_reported:
+        if hint:
+            console.print(f"[yellow]💡 {hint}[/yellow]")
+        return
     if hint:
         console.print(f"[yellow]💡 {hint}[/yellow]")
-        return
-    console.print(f"[bold red]❌ {prefix}: {clean}[/bold red]")
+    else:
+        # Escaped for the same "[youtube]"-as-markup reason as MyLogger.error.
+        console.print(f"[bold red]❌ {prefix}: {escape(clean)}[/bold red]")
+    if already_reported is not None:
+        already_reported.add(clean)
+
+
+def _logger_reported(ydl_opts: dict[str, Any]) -> set[str] | None:
+    """The reported-errors set of the MyLogger carried in ydl_opts, if any."""
+    logger = ydl_opts.get("logger")
+    return logger.reported_errors if isinstance(logger, MyLogger) else None
 
 
 def report_already_downloaded(record: DownloadRecord, console: Console) -> None:
@@ -1008,10 +1036,12 @@ def prompt_audio_options(url: str | None = None) -> AudioOptions:
 # =====================================================================
 
 
-def make_extract_opts(verbose: bool = False) -> dict[str, Any]:
+def make_extract_opts(
+    verbose: bool = False, logger: MyLogger | None = None
+) -> dict[str, Any]:
     """The YoutubeDL options shared by every extraction and download path."""
     return {
-        "logger": MyLogger(verbose=verbose),
+        "logger": logger or MyLogger(verbose=verbose),
         "quiet": not verbose,
         # yt-dlp colors ERROR:/WARNING: prefixes whenever stderr is a TTY,
         # even when a custom logger is set; our logger does its own styling.
@@ -1079,9 +1109,17 @@ def get_video_info(
     browser_spec: tuple[str, ...] | None = None,
     cookie_file: str | None = None,
     verbose: bool = False,
+    logger: MyLogger | None = None,
 ) -> dict[str, Any]:
-    """Extract video metadata without downloading it."""
-    ydl_opts = make_extract_opts(verbose)
+    """
+    Extract video metadata without downloading it.
+
+    A caller that reports extraction failures can pass its own logger and read
+    back logger.reported_errors, so the except handler does not re-print what
+    yt-dlp already logged before raising. Passed positionally to stay
+    compatible with *_args test doubles.
+    """
+    ydl_opts = make_extract_opts(verbose, logger)
     apply_cookie_opts(ydl_opts, browser_spec, cookie_file)
 
     with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
@@ -1146,12 +1184,12 @@ def download_video(
             # skipped are in it too; reporting dedupes.
             report_already_downloaded(record, Console())
             return code
-        report_failure(msg, Console(), "Download error")
+        report_failure(msg, Console(), "Download error", _logger_reported(ydl_opts))
         if is_sponsorblock_embed_rerun(msg, record, extra_opts or {}):
             Console().print(f"[yellow]💡 {SPONSORBLOCK_EMBED_RERUN_HINT}[/yellow]")
         return 1
     except Exception as e:
-        report_failure(str(e), Console(), "Download error")
+        report_failure(str(e), Console(), "Download error", _logger_reported(ydl_opts))
         return 1
 
     report_already_downloaded(record, Console())
@@ -1214,10 +1252,10 @@ def download_from_info_json(
         with build_downloader(ydl_opts, record) as ydl:
             code = int(ydl.download_with_info_file(info_file))
     except DownloadError as e:
-        report_failure(str(e), Console(), "Download error")
+        report_failure(str(e), Console(), "Download error", _logger_reported(ydl_opts))
         return 1
     except Exception as e:
-        report_failure(str(e), Console(), "Download error")
+        report_failure(str(e), Console(), "Download error", _logger_reported(ydl_opts))
         return 1
 
     report_already_downloaded(record, Console())
@@ -1624,7 +1662,9 @@ def download_subtitles_only(
                 record=record,
                 pin_sub_langs=pin_sub_langs,
             )
-        report_failure(str(error), Console(), "Subtitle download error")
+        report_failure(
+            str(error), Console(), "Subtitle download error", _logger_reported(ydl_opts)
+        )
         return 1
     return 0
 
@@ -1673,10 +1713,13 @@ def report_subtitle_download(
         return finish(info)
 
     if info is None:
+        logger = MyLogger(verbose=verbose)
         try:
-            info = get_video_info(url, browser_spec, cookie_file, verbose)
+            info = get_video_info(url, browser_spec, cookie_file, verbose, logger)
         except Exception as error:
-            report_failure(f"Extraction failed: {error}", console, "Subtitle error")
+            report_failure(
+                str(error), console, "Extraction failed", logger.reported_errors
+            )
             console.print("[bold red]❌ Subtitles download failed![/bold red]")
             return 1
 
@@ -1921,14 +1964,22 @@ def do_download_interactive(
         console = Console()
     if info is None:
         with console.status("[bold blue]Fetching metadata...[/bold blue]"):
+            fetch_logger = MyLogger()
             try:
                 info = get_video_info(
                     url,
-                    browser_spec=session_browser_spec(),
-                    cookie_file=session_cookies_file,
+                    session_browser_spec(),
+                    session_cookies_file,
+                    False,
+                    fetch_logger,
                 )
             except Exception as e:
-                report_failure(f"Failed to fetch metadata: {e}", console, "Error")
+                report_failure(
+                    str(e),
+                    console,
+                    "Failed to fetch metadata",
+                    fetch_logger.reported_errors,
+                )
                 return
 
     is_playlist = info.get("_type") == "playlist"
@@ -2218,15 +2269,23 @@ def run_interactive_menu() -> None:
 
         if choice == "1":
             url = prompt_for_url(console)
+            menu_logger = MyLogger()
             with console.status("[bold blue]Fetching metadata...[/bold blue]"):
                 try:
                     info = get_video_info(
                         url,
-                        browser_spec=session_browser_spec(),
-                        cookie_file=session_cookies_file,
+                        session_browser_spec(),
+                        session_cookies_file,
+                        False,
+                        menu_logger,
                     )
                 except Exception as e:
-                    report_failure(f"Extraction failed: {e}", console, "Error")
+                    report_failure(
+                        str(e),
+                        console,
+                        "Extraction failed",
+                        menu_logger.reported_errors,
+                    )
                     continue
 
             print_video_info(info, console)
@@ -2476,15 +2535,19 @@ def info(
         parse_browser_spec(cookies_from_browser) if cookies_from_browser else None
     )
     with console.status("[bold blue]Fetching video metadata...[/bold blue]"):
+        info_logger = MyLogger(verbose=verbose)
         try:
             video_info = get_video_info(
                 url,
-                browser_spec=browser_spec,
-                cookie_file=cookies,
-                verbose=verbose,
+                browser_spec,
+                cookies,
+                verbose,
+                info_logger,
             )
         except Exception as e:
-            report_failure(f"Failed to extract info: {e}", console, "Error")
+            report_failure(
+                str(e), console, "Extraction failed", info_logger.reported_errors
+            )
             raise typer.Exit(code=1) from e
 
     print_video_info(video_info, console)
@@ -2700,18 +2763,21 @@ def download(
                 except (OSError, json.JSONDecodeError) as error:
                     report_failure(str(error), console, "Subtitle metadata error")
             elif url:
+                sub_logger = MyLogger(verbose=verbose)
                 try:
                     download_info = get_video_info(
                         url,
-                        browser_spec=browser_spec,
-                        cookie_file=cookies,
-                        verbose=verbose,
+                        browser_spec,
+                        cookies,
+                        verbose,
+                        sub_logger,
                     )
                 except Exception as error:
                     report_failure(
-                        f"Could not inspect subtitle tracks: {error}",
+                        str(error),
                         console,
-                        "Subtitle metadata error",
+                        "Could not inspect subtitle tracks",
+                        sub_logger.reported_errors,
                     )
 
         configure_requested_subtitles(

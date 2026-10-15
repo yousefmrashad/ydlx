@@ -662,6 +662,14 @@ def test_logger_still_reports_other_errors(
     assert "something broke" in capsys.readouterr().out
 
 
+def test_logger_keeps_ytdlp_bracket_prefixes_visible(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Rich must not swallow "[youtube]" as a markup tag in error lines."""
+    ydlx.MyLogger(verbose=True).error("ERROR: [youtube] abc: Video unavailable")
+    assert "[youtube] abc: Video unavailable" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
@@ -684,3 +692,83 @@ def test_report_failure_stays_quiet_for_other_errors(
     out = capsys.readouterr().out
     assert "Download error: HTTP Error 404: Not Found" in out
     assert "App-Bound" not in out
+
+
+def test_report_failure_skips_what_the_logger_already_printed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The except handler must not echo the line yt-dlp logged before raising."""
+    logger = ydlx.MyLogger(verbose=True)
+    logger.error("ERROR: [youtube] abc: Video unavailable")
+    capsys.readouterr()
+    console = ydlx.Console()
+    ydlx.report_failure(
+        "ERROR: [youtube] abc: Video unavailable",
+        console,
+        "Download error",
+        logger.reported_errors,
+    )
+    assert capsys.readouterr().out == ""
+
+
+def test_report_failure_still_hints_for_an_already_logged_cookie_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The logger prints raw text only, so the hint is still worth adding once."""
+    logger = ydlx.MyLogger(verbose=True)
+    logger.error("ERROR: Failed to decrypt with DPAPI.")
+    capsys.readouterr()
+    console = ydlx.Console()
+    ydlx.report_failure(
+        "ERROR: Failed to decrypt with DPAPI.",
+        console,
+        "Download error",
+        logger.reported_errors,
+    )
+    out = capsys.readouterr().out
+    assert "App-Bound Encryption" in out
+    assert "Failed to decrypt with DPAPI" not in out
+
+
+def test_report_failure_records_new_messages(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Repeats across handlers collapse even without a logger in the loop."""
+    seen: set[str] = set()
+    console = ydlx.Console()
+    ydlx.report_failure("ERROR: boom", console, "Download error", seen)
+    ydlx.report_failure("ERROR: boom", console, "Download error", seen)
+    assert capsys.readouterr().out.count("boom") == 1
+
+
+def test_logger_reported_reads_the_set_from_ydl_opts() -> None:
+    logger = ydlx.MyLogger()
+    opts = ydlx.make_extract_opts(logger=logger)
+    assert ydlx._logger_reported(opts) is logger.reported_errors
+    assert ydlx._logger_reported({}) is None
+
+
+def test_get_video_info_uses_the_provided_logger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Callers pass a logger so the handler can see what was already printed."""
+    captured: dict[str, Any] = {}
+
+    class FakeYoutubeDL:
+        def __init__(self, params: Any) -> None:
+            captured["logger"] = params["logger"]
+
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def extract_info(self, *_args: Any, **_kwargs: Any) -> Any:
+            return {"id": "abc"}
+
+    monkeypatch.setattr(ydlx.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+    logger = ydlx.MyLogger()
+    info = ydlx.get_video_info("https://youtu.be/abc", None, None, False, logger)
+    assert info == {"id": "abc"}
+    assert captured["logger"] is logger
